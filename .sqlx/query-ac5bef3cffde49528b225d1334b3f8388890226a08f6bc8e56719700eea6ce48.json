@@ -1,0 +1,60 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT e.id, e.transfer_id, t.kind,\n                      CASE WHEN t.from_account = e.account_id THEN t.to_account\n                           ELSE t.from_account END AS \"counterparty!\",\n                      e.delta, e.balance_after, e.created_at\n               FROM ledger_entries e\n               JOIN transfers t ON t.id = e.transfer_id\n               WHERE e.account_id = $1 AND ($2::BIGINT IS NULL OR e.id < $2)\n               ORDER BY e.id DESC\n               LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "transfer_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "counterparty!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "delta",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "balance_after",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ac5bef3cffde49528b225d1334b3f8388890226a08f6bc8e56719700eea6ce48"
+}

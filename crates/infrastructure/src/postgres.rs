@@ -41,7 +41,6 @@ impl PgLedgerRepository {
     }
 }
 
-#[derive(sqlx::FromRow)]
 struct AccountRow {
     id: Uuid,
     kind: String,
@@ -71,7 +70,6 @@ impl TryFrom<AccountRow> for Account {
     }
 }
 
-#[derive(sqlx::FromRow)]
 struct TransferRow {
     id: Uuid,
     idempotency_key: String,
@@ -98,7 +96,6 @@ impl TryFrom<TransferRow> for Transfer {
     }
 }
 
-#[derive(sqlx::FromRow)]
 struct EntryRow {
     id: i64,
     transfer_id: Uuid,
@@ -136,21 +133,19 @@ fn corrupt(msg: String) -> RepoError {
     RepoError::Storage(msg.into())
 }
 
-const ACCOUNT_COLS: &str = "id, kind, owner, currency, balance, version";
-const TRANSFER_COLS: &str = "id, idempotency_key, kind, from_account, to_account, amount, currency";
-
 impl LedgerRepository for PgLedgerRepository {
     async fn insert_account(&self, a: &Account) -> Result<(), RepoError> {
-        sqlx::query(
+        let currency = a.currency();
+        sqlx::query!(
             "INSERT INTO accounts (id, kind, owner, currency, balance, version)
              VALUES ($1, $2, $3, $4, $5, $6)",
+            a.id().as_uuid(),
+            a.kind().as_str(),
+            a.owner(),
+            currency.as_str(),
+            a.balance(),
+            a.version(),
         )
-        .bind(a.id().as_uuid())
-        .bind(a.kind().as_str())
-        .bind(a.owner())
-        .bind(a.currency().as_str())
-        .bind(a.balance())
-        .bind(a.version())
         .execute(&self.pool)
         .await
         .map_err(storage)?;
@@ -158,10 +153,11 @@ impl LedgerRepository for PgLedgerRepository {
     }
 
     async fn find_account(&self, id: AccountId) -> Result<Option<Account>, RepoError> {
-        sqlx::query_as::<_, AccountRow>(&format!(
-            "SELECT {ACCOUNT_COLS} FROM accounts WHERE id = $1"
-        ))
-        .bind(id.as_uuid())
+        sqlx::query_as!(
+            AccountRow,
+            "SELECT id, kind, owner, currency, balance, version FROM accounts WHERE id = $1",
+            id.as_uuid(),
+        )
         .fetch_optional(&self.pool)
         .await
         .map_err(storage)?
@@ -174,32 +170,36 @@ impl LedgerRepository for PgLedgerRepository {
         currency: Currency,
         new_id: AccountId,
     ) -> Result<Account, RepoError> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO accounts (id, kind, owner, currency) VALUES ($1, 'system', $2, $3)
              ON CONFLICT (currency) WHERE kind = 'system' DO NOTHING",
+            new_id.as_uuid(),
+            format!("system:{currency}"),
+            currency.as_str(),
         )
-        .bind(new_id.as_uuid())
-        .bind(format!("system:{currency}"))
-        .bind(currency.as_str())
         .execute(&self.pool)
         .await
         .map_err(storage)?;
 
-        let row = sqlx::query_as::<_, AccountRow>(&format!(
-            "SELECT {ACCOUNT_COLS} FROM accounts WHERE kind = 'system' AND currency = $1"
-        ))
-        .bind(currency.as_str())
+        sqlx::query_as!(
+            AccountRow,
+            "SELECT id, kind, owner, currency, balance, version
+             FROM accounts WHERE kind = 'system' AND currency = $1",
+            currency.as_str(),
+        )
         .fetch_one(&self.pool)
         .await
-        .map_err(storage)?;
-        row.try_into()
+        .map_err(storage)?
+        .try_into()
     }
 
     async fn find_transfer(&self, id: TransferId) -> Result<Option<Transfer>, RepoError> {
-        sqlx::query_as::<_, TransferRow>(&format!(
-            "SELECT {TRANSFER_COLS} FROM transfers WHERE id = $1"
-        ))
-        .bind(id.as_uuid())
+        sqlx::query_as!(
+            TransferRow,
+            "SELECT id, idempotency_key, kind, from_account, to_account, amount, currency
+             FROM transfers WHERE id = $1",
+            id.as_uuid(),
+        )
         .fetch_optional(&self.pool)
         .await
         .map_err(storage)?
@@ -211,10 +211,12 @@ impl LedgerRepository for PgLedgerRepository {
         &self,
         key: &IdempotencyKey,
     ) -> Result<Option<Transfer>, RepoError> {
-        sqlx::query_as::<_, TransferRow>(&format!(
-            "SELECT {TRANSFER_COLS} FROM transfers WHERE idempotency_key = $1"
-        ))
-        .bind(key.as_str())
+        sqlx::query_as!(
+            TransferRow,
+            "SELECT id, idempotency_key, kind, from_account, to_account, amount, currency
+             FROM transfers WHERE idempotency_key = $1",
+            key.as_str(),
+        )
         .fetch_optional(&self.pool)
         .await
         .map_err(storage)?
@@ -233,14 +235,14 @@ impl LedgerRepository for PgLedgerRepository {
         let mut accounts = [from, to];
         accounts.sort_by_key(|a| a.id());
         for acc in accounts {
-            let res = sqlx::query(
+            let res = sqlx::query!(
                 "UPDATE accounts SET balance = $1, version = $2, updated_at = now()
                  WHERE id = $3 AND version = $4",
+                acc.balance(),
+                acc.version(),
+                acc.id().as_uuid(),
+                acc.loaded_version(),
             )
-            .bind(acc.balance())
-            .bind(acc.version())
-            .bind(acc.id().as_uuid())
-            .bind(acc.loaded_version())
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
@@ -249,17 +251,19 @@ impl LedgerRepository for PgLedgerRepository {
             }
         }
 
-        let inserted = sqlx::query(
-            "INSERT INTO transfers (id, idempotency_key, kind, from_account, to_account, amount, currency)
+        let currency = t.amount().currency();
+        let inserted = sqlx::query!(
+            "INSERT INTO transfers
+                 (id, idempotency_key, kind, from_account, to_account, amount, currency)
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            t.id().as_uuid(),
+            t.idempotency_key().as_str(),
+            t.kind().as_str(),
+            t.from().as_uuid(),
+            t.to().as_uuid(),
+            t.amount().minor(),
+            currency.as_str(),
         )
-        .bind(t.id().as_uuid())
-        .bind(t.idempotency_key().as_str())
-        .bind(t.kind().as_str())
-        .bind(t.from().as_uuid())
-        .bind(t.to().as_uuid())
-        .bind(t.amount().minor())
-        .bind(t.amount().currency().as_str())
         .execute(&mut *tx)
         .await;
         if let Err(e) = inserted {
@@ -277,14 +281,14 @@ impl LedgerRepository for PgLedgerRepository {
             } else {
                 to.balance()
             };
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO ledger_entries (transfer_id, account_id, delta, balance_after)
                  VALUES ($1, $2, $3, $4)",
+                t.id().as_uuid(),
+                entry.account.as_uuid(),
+                entry.delta,
+                balance_after,
             )
-            .bind(t.id().as_uuid())
-            .bind(entry.account.as_uuid())
-            .bind(entry.delta)
-            .bind(balance_after)
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
@@ -294,20 +298,21 @@ impl LedgerRepository for PgLedgerRepository {
     }
 
     async fn list_entries(&self, query: EntryQuery) -> Result<Vec<EntryRecord>, RepoError> {
-        sqlx::query_as::<_, EntryRow>(
-            "SELECT e.id, e.transfer_id, t.kind,
-                    CASE WHEN t.from_account = e.account_id THEN t.to_account
-                         ELSE t.from_account END AS counterparty,
-                    e.delta, e.balance_after, e.created_at
-             FROM ledger_entries e
-             JOIN transfers t ON t.id = e.transfer_id
-             WHERE e.account_id = $1 AND ($2::BIGINT IS NULL OR e.id < $2)
-             ORDER BY e.id DESC
-             LIMIT $3",
+        sqlx::query_as!(
+            EntryRow,
+            r#"SELECT e.id, e.transfer_id, t.kind,
+                      CASE WHEN t.from_account = e.account_id THEN t.to_account
+                           ELSE t.from_account END AS "counterparty!",
+                      e.delta, e.balance_after, e.created_at
+               FROM ledger_entries e
+               JOIN transfers t ON t.id = e.transfer_id
+               WHERE e.account_id = $1 AND ($2::BIGINT IS NULL OR e.id < $2)
+               ORDER BY e.id DESC
+               LIMIT $3"#,
+            query.account.as_uuid(),
+            query.before,
+            i64::from(query.limit),
         )
-        .bind(query.account.as_uuid())
-        .bind(query.before)
-        .bind(i64::from(query.limit))
         .fetch_all(&self.pool)
         .await
         .map_err(storage)?
@@ -317,8 +322,8 @@ impl LedgerRepository for PgLedgerRepository {
     }
 
     async fn ping(&self) -> Result<(), RepoError> {
-        sqlx::query("SELECT 1")
-            .execute(&self.pool)
+        sqlx::query!("SELECT 1 AS ok")
+            .fetch_one(&self.pool)
             .await
             .map_err(storage)?;
         Ok(())

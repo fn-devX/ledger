@@ -30,6 +30,13 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli@0.8.6
+      - name: Apply migrations
+        run: sqlx migrate run
+      - name: SQL query cache (.sqlx) is up to date
+        run: cargo sqlx prepare --check --workspace -- --all-targets
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy (pedantic)

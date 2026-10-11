@@ -64,6 +64,7 @@ The domain is tested in milliseconds, and the storage can be swapped without tou
 - **Money is `i64` in minor units** (dirams, cents) — never `f64`.
 - **Double entry:** a deposit is a transfer from the currency's system account. The sum of balances per currency is always `0`, and so is the sum of entries. Verified by tests and by reconciliation in the database.
 - **Defense in depth:** even with a bug in the code, the database rejects a negative customer balance (`CHECK`) and a duplicate key (`UNIQUE`).
+- **Compile-time checked SQL:** every query uses `sqlx::query!` / `query_as!`, so a typo in a column name, a wrong parameter type or a nullable column read into a non-`Option` field is a **compile error**, not a production incident. Query metadata is cached in `.sqlx/` (committed), and `.cargo/config.toml` sets `SQLX_OFFLINE=true`, so building never needs a running database — on a laptop, in Docker or in CI. CI fails if the cache is stale.
 - **Native `async fn` in traits** instead of `async_trait`; static dispatch through generics.
 - **UUIDv7** — time-ordered, index-friendly ids.
 - **Errors:** `thiserror` per layer; the API returns `application/problem+json` and never leaks internal details.
@@ -111,6 +112,20 @@ cargo test --workspace                                  # in-memory
 DATABASE_URL=postgres://ledger:ledger@localhost:5432/ledger cargo test --workspace  # + Postgres
 ```
 
+### Changing SQL
+
+Queries are verified against the real schema at compile time. After you add or change a query
+(or a migration), refresh the offline cache with Postgres running and commit `.sqlx/`:
+
+```bash
+cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features postgres,rustls
+docker compose up -d postgres
+sqlx migrate run
+cargo sqlx prepare --workspace -- --all-targets
+```
+
+If you forget, the build tells you: `there is no cached data for this query, run cargo sqlx prepare`.
+
 Contract tests (`crates/infrastructure/tests`) run **the same scenarios** against both
 adapters, including 50 concurrent transfers from one account: exactly as many succeed as the
 balance allows, not a single diram more. CI (GitHub Actions) runs all of this against Postgres
@@ -119,7 +134,7 @@ and builds the Docker image.
 ## Roadmap
 
 - [x] Paginated account entry history, `GET /v1/accounts/{id}/entries`
-- [ ] `sqlx` compile-time checked queries (`query!` + offline mode)
+- [x] `sqlx` compile-time checked queries (`query!` + offline mode)
 - [ ] OpenAPI spec (`utoipa`) and Swagger UI
 - [ ] Authentication (JWT), rate limiting (Redis)
 - [ ] Outbox pattern → Kafka/NATS, notification service over gRPC (`tonic`)

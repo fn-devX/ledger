@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE accounts SET balance = $1, version = $2, updated_at = now()\n                 WHERE id = $3 AND version = $4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "13c3a752296e25f2b3f09f224b0327ed5e210f51ee98d111b4e4480708e321e9"
+}

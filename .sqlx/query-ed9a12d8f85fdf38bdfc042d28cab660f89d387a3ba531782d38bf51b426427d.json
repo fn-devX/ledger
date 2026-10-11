@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO accounts (id, kind, owner, currency) VALUES ($1, 'system', $2, $3)\n             ON CONFLICT (currency) WHERE kind = 'system' DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ed9a12d8f85fdf38bdfc042d28cab660f89d387a3ba531782d38bf51b426427d"
+}
