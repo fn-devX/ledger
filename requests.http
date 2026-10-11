@@ -1,0 +1,37 @@
+@host = http://localhost:8080
+
+### Open account
+POST {{host}}/v1/accounts
+Content-Type: application/json
+
+{ "owner": "Firuz", "currency": "TJS" }
+
+> {% client.global.set("a", response.body.id); %}
+
+### Open second account
+POST {{host}}/v1/accounts
+Content-Type: application/json
+
+{ "owner": "Nigina", "currency": "TJS" }
+
+> {% client.global.set("b", response.body.id); %}
+
+### Deposit 1000.00 TJS to the first account
+POST {{host}}/v1/accounts/{{a}}/deposits
+Content-Type: application/json
+Idempotency-Key: {{$random.uuid}}
+
+{ "amount_minor": 100000, "currency": "TJS" }
+
+### Transfer 250.00 TJS (repeat it to get 200 and the same transfer)
+POST {{host}}/v1/transfers
+Content-Type: application/json
+Idempotency-Key: demo-transfer-1
+
+{ "from": "{{a}}", "to": "{{b}}", "amount_minor": 25000, "currency": "TJS" }
+
+### Get balance
+GET {{host}}/v1/accounts/{{a}}
+
+### Health
+GET {{host}}/health/ready
