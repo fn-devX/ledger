@@ -1,3 +1,5 @@
+use std::future::{Future, ready};
+
 use axum::{
     extract::{FromRequest, FromRequestParts},
     http::request::Parts,
@@ -19,12 +21,17 @@ pub struct IdempotencyKey(pub String);
 impl<S: Send + Sync> FromRequestParts<S> for IdempotencyKey {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        parts
-            .headers
-            .get("idempotency-key")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| Self(v.to_owned()))
-            .ok_or_else(|| ApiError::BadRequest("missing Idempotency-Key header".into()))
+    fn from_request_parts(
+        parts: &mut Parts,
+        _: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        ready(
+            parts
+                .headers
+                .get("idempotency-key")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| Self(v.to_owned()))
+                .ok_or_else(|| ApiError::BadRequest("missing Idempotency-Key header".into())),
+        )
     }
 }

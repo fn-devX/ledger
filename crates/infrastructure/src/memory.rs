@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    future::{Future, ready},
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -51,74 +52,99 @@ fn persisted(a: &Account) -> Account {
     )
 }
 
-impl LedgerRepository for InMemoryLedger {
-    async fn insert_account(&self, account: &Account) -> Result<(), RepoError> {
-        self.lock()
-            .accounts
-            .insert(account.id(), persisted(account));
-        Ok(())
-    }
-
-    async fn find_account(&self, id: AccountId) -> Result<Option<Account>, RepoError> {
-        Ok(self.lock().accounts.get(&id).cloned())
-    }
-
-    async fn system_account(
-        &self,
-        currency: Currency,
-        new_id: AccountId,
-    ) -> Result<Account, RepoError> {
-        let mut s = self.lock();
-        let id = *s.system.entry(currency).or_insert(new_id);
-        Ok(s.accounts
+impl State {
+    fn system_account(&mut self, currency: Currency, new_id: AccountId) -> Account {
+        let id = *self.system.entry(currency).or_insert(new_id);
+        self.accounts
             .entry(id)
             .or_insert_with(|| Account::system(id, currency))
-            .clone())
+            .clone()
     }
 
-    async fn find_transfer(&self, id: TransferId) -> Result<Option<Transfer>, RepoError> {
-        Ok(self.lock().transfers.get(&id).cloned())
-    }
-
-    async fn find_transfer_by_key(
-        &self,
-        key: &IdempotencyKey,
-    ) -> Result<Option<Transfer>, RepoError> {
-        let s = self.lock();
-        Ok(s.keys
+    fn find_transfer_by_key(&self, key: &IdempotencyKey) -> Option<Transfer> {
+        self.keys
             .get(key.as_str())
-            .and_then(|id| s.transfers.get(id))
-            .cloned())
+            .and_then(|id| self.transfers.get(id))
+            .cloned()
     }
 
-    async fn commit_transfer(
-        &self,
+    fn commit_transfer(
+        &mut self,
         transfer: &Transfer,
         from: &Account,
         to: &Account,
     ) -> Result<(), RepoError> {
-        let mut s = self.lock();
         for acc in [from, to] {
-            let stored = s.accounts.get(&acc.id()).map(Account::version);
+            let stored = self.accounts.get(&acc.id()).map(Account::version);
             if stored != Some(acc.loaded_version()) {
                 return Err(RepoError::Conflict);
             }
         }
-        if s.keys.contains_key(transfer.idempotency_key().as_str()) {
+        if self.keys.contains_key(transfer.idempotency_key().as_str()) {
             return Err(RepoError::DuplicateIdempotencyKey);
         }
-        s.accounts.insert(from.id(), persisted(from));
-        s.accounts.insert(to.id(), persisted(to));
-        s.keys.insert(
+        self.accounts.insert(from.id(), persisted(from));
+        self.accounts.insert(to.id(), persisted(to));
+        self.keys.insert(
             transfer.idempotency_key().as_str().to_owned(),
             transfer.id(),
         );
-        s.transfers.insert(transfer.id(), transfer.clone());
-        s.entries.extend(transfer.entries());
+        self.transfers.insert(transfer.id(), transfer.clone());
+        self.entries.extend(transfer.entries());
         Ok(())
     }
+}
 
-    async fn ping(&self) -> Result<(), RepoError> {
-        Ok(())
+impl LedgerRepository for InMemoryLedger {
+    fn insert_account(
+        &self,
+        account: &Account,
+    ) -> impl Future<Output = Result<(), RepoError>> + Send {
+        self.lock()
+            .accounts
+            .insert(account.id(), persisted(account));
+        ready(Ok(()))
+    }
+
+    fn find_account(
+        &self,
+        id: AccountId,
+    ) -> impl Future<Output = Result<Option<Account>, RepoError>> + Send {
+        ready(Ok(self.lock().accounts.get(&id).cloned()))
+    }
+
+    fn system_account(
+        &self,
+        currency: Currency,
+        new_id: AccountId,
+    ) -> impl Future<Output = Result<Account, RepoError>> + Send {
+        ready(Ok(self.lock().system_account(currency, new_id)))
+    }
+
+    fn find_transfer(
+        &self,
+        id: TransferId,
+    ) -> impl Future<Output = Result<Option<Transfer>, RepoError>> + Send {
+        ready(Ok(self.lock().transfers.get(&id).cloned()))
+    }
+
+    fn find_transfer_by_key(
+        &self,
+        key: &IdempotencyKey,
+    ) -> impl Future<Output = Result<Option<Transfer>, RepoError>> + Send {
+        ready(Ok(self.lock().find_transfer_by_key(key)))
+    }
+
+    fn commit_transfer(
+        &self,
+        transfer: &Transfer,
+        from: &Account,
+        to: &Account,
+    ) -> impl Future<Output = Result<(), RepoError>> + Send {
+        ready(self.lock().commit_transfer(transfer, from, to))
+    }
+
+    fn ping(&self) -> impl Future<Output = Result<(), RepoError>> + Send {
+        ready(Ok(()))
     }
 }
