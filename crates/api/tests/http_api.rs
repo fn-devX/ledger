@@ -157,3 +157,106 @@ async fn health_endpoints() {
         StatusCode::OK
     );
 }
+
+#[tokio::test]
+async fn entries_are_paginated_with_cursor() {
+    let app = app();
+    let (a, b) = (open(&app).await, open(&app).await);
+    call(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{a}/deposits"),
+        Some("dep"),
+        Some(json!({"amount_minor": 10_000, "currency": "TJS"})),
+    )
+    .await;
+    for (i, amount) in [100, 200, 300].into_iter().enumerate() {
+        let body = json!({"from": a, "to": b, "amount_minor": amount, "currency": "TJS"});
+        let (s, _) = call(
+            &app,
+            "POST",
+            "/v1/transfers",
+            Some(&format!("t{i}")),
+            Some(body),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+    }
+
+    let (s, page) = call(
+        &app,
+        "GET",
+        &format!("/v1/accounts/{a}/entries?limit=3"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let items = page["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0]["delta_minor"], -300);
+    assert_eq!(items[0]["balance_after_minor"], 9_400);
+    assert_eq!(items[0]["counterparty"], b.as_str());
+    assert_eq!(items[0]["currency"], "TJS");
+    assert!(items[0]["created_at"].as_str().unwrap().ends_with('Z'));
+
+    let cursor = page["next_cursor"].as_str().unwrap();
+    let (s, rest) = call(
+        &app,
+        "GET",
+        &format!("/v1/accounts/{a}/entries?limit=3&cursor={cursor}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(rest["items"].as_array().unwrap().len(), 1);
+    assert_eq!(rest["items"][0]["kind"], "deposit");
+    assert_eq!(rest["next_cursor"], Value::Null);
+
+    let (s, p) = call(
+        &app,
+        "GET",
+        &format!("/v1/accounts/{a}/entries?cursor=nope"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        (s, p["type"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("bad_request"))
+    );
+
+    let (s, p) = call(
+        &app,
+        "GET",
+        &format!("/v1/accounts/{a}/entries?limit=0"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        (s, p["type"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_page_size"))
+    );
+
+    let (s, _) = call(
+        &app,
+        "GET",
+        &format!("/v1/accounts/{a}/entries?limit=abc"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    let (s, _) = call(
+        &app,
+        "GET",
+        &format!("/v1/accounts/{}/entries", uuid::Uuid::now_v7()),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}

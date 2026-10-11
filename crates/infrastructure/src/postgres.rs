@@ -1,9 +1,10 @@
-use ledger_application::ports::{LedgerRepository, RepoError};
+use ledger_application::ports::{EntryQuery, EntryRecord, LedgerRepository, RepoError};
 use ledger_domain::{
     Account, AccountId, AccountKind, Currency, IdempotencyKey, Money, Transfer, TransferId,
     TransferKind,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
@@ -84,11 +85,7 @@ struct TransferRow {
 impl TryFrom<TransferRow> for Transfer {
     type Error = RepoError;
     fn try_from(r: TransferRow) -> Result<Self, RepoError> {
-        let kind = match r.kind.as_str() {
-            "deposit" => TransferKind::Deposit,
-            "transfer" => TransferKind::Transfer,
-            other => return Err(corrupt(format!("unknown transfer kind {other}"))),
-        };
+        let kind = parse_transfer_kind(&r.kind)?;
         let currency = Currency::parse(&r.currency).map_err(storage)?;
         Ok(Transfer::restore(
             TransferId::from_uuid(r.id),
@@ -98,6 +95,40 @@ impl TryFrom<TransferRow> for Transfer {
             AccountId::from_uuid(r.to_account),
             Money::new(r.amount, currency).map_err(storage)?,
         ))
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct EntryRow {
+    id: i64,
+    transfer_id: Uuid,
+    kind: String,
+    counterparty: Uuid,
+    delta: i64,
+    balance_after: i64,
+    created_at: OffsetDateTime,
+}
+
+impl TryFrom<EntryRow> for EntryRecord {
+    type Error = RepoError;
+    fn try_from(r: EntryRow) -> Result<Self, RepoError> {
+        Ok(EntryRecord {
+            id: r.id,
+            transfer_id: TransferId::from_uuid(r.transfer_id),
+            kind: parse_transfer_kind(&r.kind)?,
+            counterparty: AccountId::from_uuid(r.counterparty),
+            delta: r.delta,
+            balance_after: r.balance_after,
+            created_at: r.created_at,
+        })
+    }
+}
+
+fn parse_transfer_kind(raw: &str) -> Result<TransferKind, RepoError> {
+    match raw {
+        "deposit" => Ok(TransferKind::Deposit),
+        "transfer" => Ok(TransferKind::Transfer),
+        other => Err(corrupt(format!("unknown transfer kind {other}"))),
     }
 }
 
@@ -241,18 +272,48 @@ impl LedgerRepository for PgLedgerRepository {
         }
 
         for entry in t.entries() {
+            let balance_after = if entry.account == from.id() {
+                from.balance()
+            } else {
+                to.balance()
+            };
             sqlx::query(
-                "INSERT INTO ledger_entries (transfer_id, account_id, delta) VALUES ($1, $2, $3)",
+                "INSERT INTO ledger_entries (transfer_id, account_id, delta, balance_after)
+                 VALUES ($1, $2, $3, $4)",
             )
             .bind(t.id().as_uuid())
             .bind(entry.account.as_uuid())
             .bind(entry.delta)
+            .bind(balance_after)
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
         }
 
         tx.commit().await.map_err(storage)
+    }
+
+    async fn list_entries(&self, query: EntryQuery) -> Result<Vec<EntryRecord>, RepoError> {
+        sqlx::query_as::<_, EntryRow>(
+            "SELECT e.id, e.transfer_id, t.kind,
+                    CASE WHEN t.from_account = e.account_id THEN t.to_account
+                         ELSE t.from_account END AS counterparty,
+                    e.delta, e.balance_after, e.created_at
+             FROM ledger_entries e
+             JOIN transfers t ON t.id = e.transfer_id
+             WHERE e.account_id = $1 AND ($2::BIGINT IS NULL OR e.id < $2)
+             ORDER BY e.id DESC
+             LIMIT $3",
+        )
+        .bind(query.account.as_uuid())
+        .bind(query.before)
+        .bind(i64::from(query.limit))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?
+        .into_iter()
+        .map(EntryRecord::try_from)
+        .collect()
     }
 
     async fn ping(&self) -> Result<(), RepoError> {

@@ -33,5 +33,8 @@ Idempotency-Key: demo-transfer-1
 ### Get balance
 GET {{host}}/v1/accounts/{{a}}
 
+### Account statement (newest first, paginated; pass next_cursor as ?cursor=)
+GET {{host}}/v1/accounts/{{a}}/entries?limit=20
+
 ### Health
 GET {{host}}/health/ready

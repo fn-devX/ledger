@@ -6,15 +6,18 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use ledger_application::{
-    Deposit, LedgerService, OpenAccount, TransferFunds, TransferOutcome,
+    Deposit, LedgerService, ListEntries, OpenAccount, TransferFunds, TransferOutcome,
     ports::{IdGenerator, LedgerRepository},
 };
 use uuid::Uuid;
 
 use super::{
-    ApiError,
-    dto::{AccountResponse, DepositRequest, OpenAccountRequest, TransferRequest, TransferResponse},
-    extract::{ApiJson, ApiPath, IdempotencyKey},
+    ApiError, cursor,
+    dto::{
+        AccountResponse, DepositRequest, EntriesQuery, EntryPageResponse, OpenAccountRequest,
+        TransferRequest, TransferResponse,
+    },
+    extract::{ApiJson, ApiPath, ApiQuery, IdempotencyKey},
 };
 
 type Svc<R, G> = State<Arc<LedgerService<R, G>>>;
@@ -81,6 +84,23 @@ pub async fn get_transfer<R: LedgerRepository, G: IdGenerator>(
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<axum::Json<TransferResponse>, ApiError> {
     Ok(axum::Json((&svc.get_transfer(id).await?).into()))
+}
+
+pub async fn list_entries<R: LedgerRepository, G: IdGenerator>(
+    State(svc): Svc<R, G>,
+    ApiPath(account): ApiPath<Uuid>,
+    ApiQuery(query): ApiQuery<EntriesQuery>,
+) -> Result<axum::Json<EntryPageResponse>, ApiError> {
+    let before = query.cursor.as_deref().map(cursor::decode).transpose()?;
+    let page = svc
+        .list_entries(ListEntries {
+            account,
+            before,
+            limit: query.limit,
+        })
+        .await?;
+    let next_cursor = page.next_before.map(cursor::encode);
+    Ok(axum::Json(EntryPageResponse::new(&page, next_cursor)))
 }
 
 pub async fn ready<R: LedgerRepository, G: IdGenerator>(State(svc): Svc<R, G>) -> StatusCode {

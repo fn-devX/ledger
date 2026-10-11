@@ -67,6 +67,8 @@ The domain is tested in milliseconds, and the storage can be swapped without tou
 - **Native `async fn` in traits** instead of `async_trait`; static dispatch through generics.
 - **UUIDv7** — time-ordered, index-friendly ids.
 - **Errors:** `thiserror` per layer; the API returns `application/problem+json` and never leaks internal details.
+- **Keyset (cursor) pagination** for statements: `WHERE id < cursor ORDER BY id DESC` runs as a backward index scan on `(account_id, id)`, so page 1000 is as fast as page 1 and rows inserted meanwhile never shift pages (unlike `OFFSET`). The cursor is opaque to clients.
+- **Running balance** is stored on each entry (`balance_after`) at write time; the migration that added it backfilled existing rows with a window function.
 - **Observability:** `tracing` spans for every request with `x-request-id`; JSON logs in production.
 
 ## Running (Windows / Linux / macOS)
@@ -82,6 +84,10 @@ cargo run -p ledger-api            # http://localhost:8080
 Without `DATABASE_URL` the service starts with in-memory storage — handy for quick experiments.
 Everything in containers: `docker compose --profile full up --build`.
 
+On Windows you can just double-click `scripts\run.cmd` (starts the service on port 8090),
+then `scripts\demo.cmd` — it walks through deposits, transfers, idempotent retries, error cases
+and 20 parallel transfers, then prints a paginated account statement.
+
 Sample requests are in `requests.http` (RustRover or the VS Code REST Client extension).
 
 ## API
@@ -90,6 +96,7 @@ Sample requests are in `requests.http` (RustRover or the VS Code REST Client ext
 |---|---|---|
 | `POST` | `/v1/accounts` | open an account `{owner, currency}` |
 | `GET` | `/v1/accounts/{id}` | account and balance |
+| `GET` | `/v1/accounts/{id}/entries?limit=&cursor=` | statement: entries newest first with running balance, cursor pagination |
 | `POST` | `/v1/accounts/{id}/deposits` | deposit `{amount_minor, currency}` + `Idempotency-Key` |
 | `POST` | `/v1/transfers` | transfer `{from, to, amount_minor, currency}` + `Idempotency-Key` |
 | `GET` | `/v1/transfers/{id}` | transfer |
@@ -111,7 +118,7 @@ and builds the Docker image.
 
 ## Roadmap
 
-- [ ] Paginated account entry history, `GET /v1/accounts/{id}/entries`
+- [x] Paginated account entry history, `GET /v1/accounts/{id}/entries`
 - [ ] `sqlx` compile-time checked queries (`query!` + offline mode)
 - [ ] OpenAPI spec (`utoipa`) and Swagger UI
 - [ ] Authentication (JWT), rate limiting (Redis)

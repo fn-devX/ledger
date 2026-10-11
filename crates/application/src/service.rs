@@ -6,8 +6,11 @@ use uuid::Uuid;
 
 use crate::{
     AppError,
-    ports::{IdGenerator, LedgerRepository, RepoError},
+    ports::{EntryQuery, EntryRecord, IdGenerator, LedgerRepository, RepoError},
 };
+
+pub const DEFAULT_PAGE_SIZE: u32 = 20;
+pub const MAX_PAGE_SIZE: u32 = 100;
 
 #[derive(Debug, Clone)]
 pub struct OpenAccount {
@@ -36,6 +39,20 @@ pub struct TransferFunds {
 pub struct TransferOutcome {
     pub transfer: Transfer,
     pub replayed: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ListEntries {
+    pub account: Uuid,
+    pub before: Option<i64>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EntryPage {
+    pub account: Account,
+    pub entries: Vec<EntryRecord>,
+    pub next_before: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -95,6 +112,34 @@ impl<R: LedgerRepository, G: IdGenerator> LedgerService<R, G> {
             .find_transfer(TransferId::from_uuid(id))
             .await?
             .ok_or(AppError::TransferNotFound(id))
+    }
+
+    pub async fn list_entries(&self, query: ListEntries) -> Result<EntryPage, AppError> {
+        let limit = query.limit.unwrap_or(DEFAULT_PAGE_SIZE);
+        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
+            return Err(AppError::InvalidPageSize { max: MAX_PAGE_SIZE });
+        }
+        let account = self.get_account(query.account).await?;
+        let mut entries = self
+            .repo
+            .list_entries(EntryQuery {
+                account: account.id(),
+                before: query.before,
+                limit: limit + 1,
+            })
+            .await?;
+        let page_len = limit as usize;
+        let next_before = if entries.len() > page_len {
+            entries.truncate(page_len);
+            entries.last().map(|e| e.id)
+        } else {
+            None
+        };
+        Ok(EntryPage {
+            account,
+            entries,
+            next_before,
+        })
     }
 
     #[tracing::instrument(skip(self), err(level = "warn"))]

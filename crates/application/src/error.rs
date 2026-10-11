@@ -13,6 +13,8 @@ pub enum AppError {
     TransferNotFound(Uuid),
     #[error("idempotency key was already used with different parameters")]
     IdempotencyKeyReused,
+    #[error("page size must be between 1 and {max}")]
+    InvalidPageSize { max: u32 },
     #[error("too much contention, retry later")]
     Contention,
     #[error(transparent)]

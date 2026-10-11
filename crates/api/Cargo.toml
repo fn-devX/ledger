@@ -12,6 +12,8 @@ name = "ledger-api"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
+time.workspace = true
 ledger-domain.workspace = true
 ledger-application.workspace = true
 ledger-infrastructure.workspace = true

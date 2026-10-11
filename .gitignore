@@ -10,6 +10,8 @@ tarpaulin-report.html
 .env.*
 !.env.example
 
+/scripts
+
 .idea/
 .vscode/
 *.iml

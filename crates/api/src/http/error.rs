@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::rejection::{JsonRejection, PathRejection},
+    extract::rejection::{JsonRejection, PathRejection, QueryRejection},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -16,6 +16,11 @@ pub enum ApiError {
     BadRequest(String),
 }
 
+impl From<QueryRejection> for ApiError {
+    fn from(e: QueryRejection) -> Self {
+        Self::BadRequest(e.body_text())
+    }
+}
 impl From<JsonRejection> for ApiError {
     fn from(e: JsonRejection) -> Self {
         Self::BadRequest(e.body_text())
@@ -55,6 +60,7 @@ impl ApiError {
                 A::AccountNotFound(_) | A::TransferNotFound(_) => {
                     (StatusCode::NOT_FOUND, "not_found")
                 }
+                A::InvalidPageSize { .. } => (StatusCode::BAD_REQUEST, "invalid_page_size"),
                 A::IdempotencyKeyReused => (StatusCode::CONFLICT, "idempotency_key_reused"),
                 A::Contention => (StatusCode::SERVICE_UNAVAILABLE, "contention"),
                 A::Repository(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),

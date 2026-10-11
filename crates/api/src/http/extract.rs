@@ -15,6 +15,10 @@ pub struct ApiJson<T>(pub T);
 #[from_request(via(axum::extract::Path), rejection(ApiError))]
 pub struct ApiPath<T>(pub T);
 
+#[derive(Debug, FromRequestParts)]
+#[from_request(via(axum::extract::Query), rejection(ApiError))]
+pub struct ApiQuery<T>(pub T);
+
 #[derive(Debug)]
 pub struct IdempotencyKey(pub String);
 

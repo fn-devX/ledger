@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use ledger_application::{
-    AppError, Deposit, LedgerService, OpenAccount, TransferFunds, ports::LedgerRepository,
+    AppError, Deposit, LedgerService, ListEntries, OpenAccount, TransferFunds,
+    ports::{EntryRecord, LedgerRepository},
 };
 use ledger_domain::DomainError;
+use ledger_domain::TransferKind;
 use ledger_infrastructure::{InMemoryLedger, PgLedgerRepository, UuidV7Generator};
 use uuid::Uuid;
 
@@ -135,6 +137,144 @@ async fn concurrent_transfers_never_overdraw<R: LedgerRepository>(svc: Svc<R>) {
     assert_eq!(ok, 10);
     assert_eq!(balance(&svc, a).await, 0);
     assert_eq!(balance(&svc, b).await, 1_000);
+
+    for (account, expected) in [(a, 11), (b, 10)] {
+        let history = all_entries(&svc, account, 7).await;
+        assert_eq!(history.len(), expected);
+        assert_running_balance(&history);
+    }
+}
+
+async fn all_entries<R: LedgerRepository>(
+    svc: &Svc<R>,
+    account: Uuid,
+    limit: u32,
+) -> Vec<EntryRecord> {
+    let mut all = Vec::new();
+    let mut before = None;
+    loop {
+        let page = svc
+            .list_entries(ListEntries {
+                account,
+                before,
+                limit: Some(limit),
+            })
+            .await
+            .unwrap();
+        assert!(page.entries.len() <= limit as usize);
+        all.extend(page.entries);
+        match page.next_before {
+            Some(cursor) => before = Some(cursor),
+            None => return all,
+        }
+    }
+}
+
+fn assert_running_balance(newest_first: &[EntryRecord]) {
+    let mut balance = 0;
+    for e in newest_first.iter().rev() {
+        balance += e.delta;
+        assert_eq!(
+            e.balance_after, balance,
+            "entry {} has a broken running balance",
+            e.id
+        );
+    }
+    assert!(
+        newest_first.windows(2).all(|w| w[0].id > w[1].id),
+        "entries must be newest first"
+    );
+}
+
+async fn entries_are_paginated_newest_first<R: LedgerRepository>(svc: Svc<R>) {
+    let cur = currency();
+    let (a, b) = (open(&svc, &cur).await, open(&svc, &cur).await);
+    deposit(&svc, a, 10_000, &cur).await;
+    for amount in [100, 200, 300] {
+        svc.transfer(transfer_cmd(a, b, amount, &cur, key()))
+            .await
+            .unwrap();
+    }
+    svc.transfer(transfer_cmd(b, a, 50, &cur, key()))
+        .await
+        .unwrap();
+
+    let first = svc
+        .list_entries(ListEntries {
+            account: a,
+            before: None,
+            limit: Some(2),
+        })
+        .await
+        .unwrap();
+    let deltas: Vec<_> = first
+        .entries
+        .iter()
+        .map(|e| (e.delta, e.balance_after))
+        .collect();
+    assert_eq!(deltas, [(50, 9_450), (-300, 9_400)]);
+    assert!(first.entries.iter().all(|e| e.counterparty.as_uuid() == b));
+    assert_eq!(first.entries[0].balance_after, balance(&svc, a).await);
+
+    let second = svc
+        .list_entries(ListEntries {
+            account: a,
+            before: first.next_before,
+            limit: Some(2),
+        })
+        .await
+        .unwrap();
+    let deltas: Vec<_> = second.entries.iter().map(|e| e.delta).collect();
+    assert_eq!(deltas, [-200, -100]);
+
+    let last = svc
+        .list_entries(ListEntries {
+            account: a,
+            before: second.next_before,
+            limit: Some(2),
+        })
+        .await
+        .unwrap();
+    assert_eq!(last.entries.len(), 1);
+    assert_eq!(last.entries[0].kind, TransferKind::Deposit);
+    assert_eq!(last.entries[0].balance_after, 10_000);
+    assert_eq!(last.next_before, None);
+
+    assert_running_balance(&all_entries(&svc, a, 100).await);
+    assert_eq!(all_entries(&svc, b, 1).await.len(), 4);
+}
+
+async fn entries_validation<R: LedgerRepository>(svc: Svc<R>) {
+    let cur = currency();
+    let a = open(&svc, &cur).await;
+    let empty = svc
+        .list_entries(ListEntries {
+            account: a,
+            before: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert!(empty.entries.is_empty() && empty.next_before.is_none());
+
+    for limit in [0, 101] {
+        let r = svc
+            .list_entries(ListEntries {
+                account: a,
+                before: None,
+                limit: Some(limit),
+            })
+            .await;
+        assert!(matches!(r, Err(AppError::InvalidPageSize { max: 100 })));
+    }
+    let r = svc
+        .list_entries(ListEntries {
+            account: Uuid::now_v7(),
+            before: None,
+            limit: None,
+        })
+        .await;
+    assert!(matches!(r, Err(AppError::AccountNotFound(_))));
 }
 
 macro_rules! contract {
@@ -175,6 +315,8 @@ contract!(
     idempotency,
     business_rules,
     concurrent_transfers_never_overdraw,
+    entries_are_paginated_newest_first,
+    entries_validation,
 );
 
 #[tokio::test]

@@ -1,3 +1,4 @@
+mod cursor;
 mod dto;
 mod error;
 mod extract;
@@ -34,6 +35,10 @@ pub fn router<R: LedgerRepository, G: IdGenerator>(
         .route("/accounts", post(handlers::open_account::<R, G>))
         .route("/accounts/{id}", get(handlers::get_account::<R, G>))
         .route("/accounts/{id}/deposits", post(handlers::deposit::<R, G>))
+        .route(
+            "/accounts/{id}/entries",
+            get(handlers::list_entries::<R, G>),
+        )
         .route("/transfers", post(handlers::transfer::<R, G>))
         .route("/transfers/{id}", get(handlers::get_transfer::<R, G>));
 

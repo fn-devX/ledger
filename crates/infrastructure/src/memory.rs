@@ -4,8 +4,9 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use ledger_application::ports::{LedgerRepository, RepoError};
+use ledger_application::ports::{EntryQuery, EntryRecord, LedgerRepository, RepoError};
 use ledger_domain::{Account, AccountId, Currency, Entry, IdempotencyKey, Transfer, TransferId};
+use time::OffsetDateTime;
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryLedger {
@@ -18,7 +19,7 @@ struct State {
     system: HashMap<Currency, AccountId>,
     transfers: HashMap<TransferId, Transfer>,
     keys: HashMap<String, TransferId>,
-    entries: Vec<Entry>,
+    entries: Vec<(AccountId, EntryRecord)>,
 }
 
 impl InMemoryLedger {
@@ -33,7 +34,14 @@ impl InMemoryLedger {
     }
 
     pub fn entries(&self) -> Vec<Entry> {
-        self.lock().entries.clone()
+        self.lock()
+            .entries
+            .iter()
+            .map(|(account, e)| Entry {
+                account: *account,
+                delta: e.delta,
+            })
+            .collect()
     }
 
     pub fn accounts(&self) -> Vec<Account> {
@@ -90,8 +98,40 @@ impl State {
             transfer.id(),
         );
         self.transfers.insert(transfer.id(), transfer.clone());
-        self.entries.extend(transfer.entries());
+        let created_at = OffsetDateTime::now_utc();
+        for entry in transfer.entries() {
+            let (balance_after, counterparty) = if entry.account == from.id() {
+                (from.balance(), to.id())
+            } else {
+                (to.balance(), from.id())
+            };
+            let id = i64::try_from(self.entries.len()).unwrap_or(i64::MAX - 1) + 1;
+            self.entries.push((
+                entry.account,
+                EntryRecord {
+                    id,
+                    transfer_id: transfer.id(),
+                    kind: transfer.kind(),
+                    counterparty,
+                    delta: entry.delta,
+                    balance_after,
+                    created_at,
+                },
+            ));
+        }
         Ok(())
+    }
+
+    fn list_entries(&self, query: EntryQuery) -> Vec<EntryRecord> {
+        self.entries
+            .iter()
+            .rev()
+            .filter(|(account, e)| {
+                *account == query.account && query.before.is_none_or(|before| e.id < before)
+            })
+            .take(query.limit as usize)
+            .map(|(_, e)| e.clone())
+            .collect()
     }
 }
 
@@ -142,6 +182,13 @@ impl LedgerRepository for InMemoryLedger {
         to: &Account,
     ) -> impl Future<Output = Result<(), RepoError>> + Send {
         ready(self.lock().commit_transfer(transfer, from, to))
+    }
+
+    fn list_entries(
+        &self,
+        query: EntryQuery,
+    ) -> impl Future<Output = Result<Vec<EntryRecord>, RepoError>> + Send {
+        ready(Ok(self.lock().list_entries(query)))
     }
 
     fn ping(&self) -> impl Future<Output = Result<(), RepoError>> + Send {

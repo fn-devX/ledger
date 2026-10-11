@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+time.workspace = true
 ledger-domain.workspace = true
 ledger-application.workspace = true
 sqlx.workspace = true
