@@ -2,37 +2,48 @@ use ledger_application::{EntryPage, ports::EntryRecord};
 use ledger_domain::{Account, Transfer};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OpenAccountRequest {
+    #[schema(example = "Firuz Rahimov", min_length = 1, max_length = 200)]
     pub owner: String,
+    #[schema(example = "TJS", pattern = "^[A-Z]{3}$")]
     pub currency: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DepositRequest {
+    #[schema(example = 100_000, minimum = 1)]
     pub amount_minor: i64,
+    #[schema(example = "TJS")]
     pub currency: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TransferRequest {
     pub from: Uuid,
     pub to: Uuid,
+    #[schema(example = 25_000, minimum = 1)]
     pub amount_minor: i64,
+    #[schema(example = "TJS")]
     pub currency: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AccountResponse {
     pub id: Uuid,
+    #[schema(example = "customer")]
     pub kind: String,
+    #[schema(example = "Firuz Rahimov")]
     pub owner: String,
+    #[schema(example = "TJS")]
     pub currency: String,
+    #[schema(example = 75_000)]
     pub balance_minor: i64,
     pub version: i64,
 }
@@ -50,9 +61,10 @@ impl From<&Account> for AccountResponse {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TransferResponse {
     pub id: Uuid,
+    #[schema(example = "transfer")]
     pub kind: String,
     pub from: Uuid,
     pub to: Uuid,
@@ -73,21 +85,28 @@ impl From<&Transfer> for TransferResponse {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
 pub struct EntriesQuery {
+    #[param(minimum = 1, maximum = 100, default = 20)]
     pub limit: Option<u32>,
+    #[param(value_type = Option<String>)]
     pub cursor: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct EntryResponse {
     pub id: i64,
     pub transfer_id: Uuid,
+    #[schema(example = "transfer")]
     pub kind: String,
     pub counterparty: Uuid,
+    #[schema(example = -25_000)]
     pub delta_minor: i64,
+    #[schema(example = 75_000)]
     pub balance_after_minor: i64,
+    #[schema(example = "TJS")]
     pub currency: String,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -108,7 +127,7 @@ impl EntryResponse {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct EntryPageResponse {
     pub items: Vec<EntryResponse>,
     pub next_cursor: Option<String>,

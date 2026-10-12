@@ -3,6 +3,7 @@ mod dto;
 mod error;
 mod extract;
 mod handlers;
+pub mod openapi;
 
 use std::{sync::Arc, time::Duration};
 
@@ -22,8 +23,11 @@ use tower_http::{
     timeout::TimeoutLayer,
     trace::TraceLayer,
 };
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 pub use error::ApiError;
+pub use openapi::ApiDoc;
 
 const REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
@@ -63,8 +67,9 @@ pub fn router<R: LedgerRepository, G: IdGenerator>(
 
     Router::new()
         .nest("/v1", v1)
-        .route("/health/live", get(|| async { "ok" }))
+        .route("/health/live", get(handlers::live))
         .route("/health/ready", get(handlers::ready::<R, G>))
         .with_state(service)
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(middleware)
 }

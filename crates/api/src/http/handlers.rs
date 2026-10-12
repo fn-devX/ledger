@@ -17,11 +17,24 @@ use super::{
         AccountResponse, DepositRequest, EntriesQuery, EntryPageResponse, OpenAccountRequest,
         TransferRequest, TransferResponse,
     },
+    error::Problem,
     extract::{ApiJson, ApiPath, ApiQuery, IdempotencyKey},
 };
 
 type Svc<R, G> = State<Arc<LedgerService<R, G>>>;
 
+#[utoipa::path(
+    post,
+    path = "/v1/accounts",
+    tag = "accounts",
+    summary = "Open a customer account",
+    request_body = OpenAccountRequest,
+    responses(
+        (status = 201, description = "Account opened", body = AccountResponse),
+        (status = 400, description = "Malformed JSON", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid owner or currency", body = Problem, content_type = "application/problem+json"),
+    )
+)]
 pub async fn open_account<R: LedgerRepository, G: IdGenerator>(
     State(svc): Svc<R, G>,
     ApiJson(req): ApiJson<OpenAccountRequest>,
@@ -38,6 +51,17 @@ pub async fn open_account<R: LedgerRepository, G: IdGenerator>(
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/accounts/{id}",
+    tag = "accounts",
+    summary = "Get an account and its balance",
+    params(("id" = Uuid, Path, description = "Account id")),
+    responses(
+        (status = 200, description = "Account", body = AccountResponse),
+        (status = 404, description = "Account not found", body = Problem, content_type = "application/problem+json"),
+    )
+)]
 pub async fn get_account<R: LedgerRepository, G: IdGenerator>(
     State(svc): Svc<R, G>,
     ApiPath(id): ApiPath<Uuid>,
@@ -45,6 +69,28 @@ pub async fn get_account<R: LedgerRepository, G: IdGenerator>(
     Ok(axum::Json((&svc.get_account(id).await?).into()))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/accounts/{id}/deposits",
+    tag = "accounts",
+    summary = "Deposit money to an account",
+    description = "Moves money from the currency's system account. Safe to retry with the same `Idempotency-Key`.",
+    params(
+        ("id" = Uuid, Path, description = "Account id"),
+        ("Idempotency-Key" = String, Header, description = "Unique key of this operation, 1..=128 visible ASCII characters"),
+    ),
+    request_body = DepositRequest,
+    responses(
+        (status = 201, description = "Deposit posted", body = TransferResponse),
+        (status = 200, description = "Replay of an earlier request with the same key", body = TransferResponse,
+            headers(("Idempotent-Replayed" = String, description = "Always `true`"))),
+        (status = 400, description = "Missing Idempotency-Key or malformed JSON", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "Account not found", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "Idempotency key reused with different parameters", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Validation or currency mismatch", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "Too much contention, retry later", body = Problem, content_type = "application/problem+json"),
+    )
+)]
 pub async fn deposit<R: LedgerRepository, G: IdGenerator>(
     State(svc): Svc<R, G>,
     ApiPath(account): ApiPath<Uuid>,
@@ -62,6 +108,27 @@ pub async fn deposit<R: LedgerRepository, G: IdGenerator>(
     Ok(transfer_response(&outcome))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/transfers",
+    tag = "transfers",
+    summary = "Transfer money between two accounts",
+    description = "Atomic double-entry transfer. Safe to retry with the same `Idempotency-Key`: the money moves exactly once.",
+    params(
+        ("Idempotency-Key" = String, Header, description = "Unique key of this operation, 1..=128 visible ASCII characters"),
+    ),
+    request_body = TransferRequest,
+    responses(
+        (status = 201, description = "Transfer posted", body = TransferResponse),
+        (status = 200, description = "Replay of an earlier request with the same key", body = TransferResponse,
+            headers(("Idempotent-Replayed" = String, description = "Always `true`"))),
+        (status = 400, description = "Missing Idempotency-Key or malformed JSON", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "Account not found", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "Idempotency key reused with different parameters", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Insufficient funds, currency mismatch or validation error", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "Too much contention, retry later", body = Problem, content_type = "application/problem+json"),
+    )
+)]
 pub async fn transfer<R: LedgerRepository, G: IdGenerator>(
     State(svc): Svc<R, G>,
     IdempotencyKey(key): IdempotencyKey,
@@ -79,6 +146,17 @@ pub async fn transfer<R: LedgerRepository, G: IdGenerator>(
     Ok(transfer_response(&outcome))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/transfers/{id}",
+    tag = "transfers",
+    summary = "Get a transfer",
+    params(("id" = Uuid, Path, description = "Transfer id")),
+    responses(
+        (status = 200, description = "Transfer", body = TransferResponse),
+        (status = 404, description = "Transfer not found", body = Problem, content_type = "application/problem+json"),
+    )
+)]
 pub async fn get_transfer<R: LedgerRepository, G: IdGenerator>(
     State(svc): Svc<R, G>,
     ApiPath(id): ApiPath<Uuid>,
@@ -86,6 +164,20 @@ pub async fn get_transfer<R: LedgerRepository, G: IdGenerator>(
     Ok(axum::Json((&svc.get_transfer(id).await?).into()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/accounts/{id}/entries",
+    tag = "accounts",
+    summary = "Account statement",
+    description = "Ledger entries of the account, newest first, with the running balance after each entry. \
+        Cursor-based pagination: pass `next_cursor` from the previous page as `cursor`.",
+    params(("id" = Uuid, Path, description = "Account id"), EntriesQuery),
+    responses(
+        (status = 200, description = "One page of entries", body = EntryPageResponse),
+        (status = 400, description = "Invalid cursor or page size", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "Account not found", body = Problem, content_type = "application/problem+json"),
+    )
+)]
 pub async fn list_entries<R: LedgerRepository, G: IdGenerator>(
     State(svc): Svc<R, G>,
     ApiPath(account): ApiPath<Uuid>,
@@ -103,6 +195,14 @@ pub async fn list_entries<R: LedgerRepository, G: IdGenerator>(
     Ok(axum::Json(EntryPageResponse::new(&page, next_cursor)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/health/ready",
+    tag = "health",
+    summary = "Readiness probe",
+    description = "200 when the storage is reachable, 503 otherwise.",
+    responses((status = 200, description = "Ready"), (status = 503, description = "Storage is unavailable"))
+)]
 pub async fn ready<R: LedgerRepository, G: IdGenerator>(State(svc): Svc<R, G>) -> StatusCode {
     match svc.repository().ping().await {
         Ok(()) => StatusCode::OK,
@@ -124,4 +224,15 @@ fn transfer_response(outcome: &TransferOutcome) -> Response {
     } else {
         (StatusCode::CREATED, body).into_response()
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/health/live",
+    tag = "health",
+    summary = "Liveness probe",
+    responses((status = 200, description = "The process is alive", body = String, example = "ok"))
+)]
+pub async fn live() -> &'static str {
+    "ok"
 }

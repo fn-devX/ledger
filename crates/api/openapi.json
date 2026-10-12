@@ -1,0 +1,753 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Ledger API",
+    "description": "Double-entry money ledger: accounts, deposits, idempotent transfers and paginated statements. Amounts are integers in minor units (1 TJS = 100 dirams). Errors follow RFC 9457 (`application/problem+json`).",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/v1/accounts": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Open a customer account",
+        "operationId": "open_account",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Account opened",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid owner or currency",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{id}": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Get an account and its balance",
+        "operationId": "get_account",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{id}/deposits": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Deposit money to an account",
+        "description": "Moves money from the currency's system account. Safe to retry with the same `Idempotency-Key`.",
+        "operationId": "deposit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Unique key of this operation, 1..=128 visible ASCII characters",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DepositRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Replay of an earlier request with the same key",
+            "headers": {
+              "Idempotent-Replayed": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `true`"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Deposit posted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing Idempotency-Key or malformed JSON",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency key reused with different parameters",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation or currency mismatch",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Too much contention, retry later",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{id}/entries": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Account statement",
+        "description": "Ledger entries of the account, newest first, with the running balance after each entry. Cursor-based pagination: pass `next_cursor` from the previous page as `cursor`.",
+        "operationId": "list_entries",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryPageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid cursor or page size",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/transfers": {
+      "post": {
+        "tags": [
+          "transfers"
+        ],
+        "summary": "Transfer money between two accounts",
+        "description": "Atomic double-entry transfer. Safe to retry with the same `Idempotency-Key`: the money moves exactly once.",
+        "operationId": "transfer",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Unique key of this operation, 1..=128 visible ASCII characters",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Replay of an earlier request with the same key",
+            "headers": {
+              "Idempotent-Replayed": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `true`"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Transfer posted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing Idempotency-Key or malformed JSON",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency key reused with different parameters",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Insufficient funds, currency mismatch or validation error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Too much contention, retry later",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/transfers/{id}": {
+      "get": {
+        "tags": [
+          "transfers"
+        ],
+        "summary": "Get a transfer",
+        "operationId": "get_transfer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Transfer id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transfer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Transfer not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/live": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness probe",
+        "operationId": "live",
+        "responses": {
+          "200": {
+            "description": "The process is alive",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "ok"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Readiness probe",
+        "description": "200 when the storage is reachable, 503 otherwise.",
+        "operationId": "ready",
+        "responses": {
+          "200": {
+            "description": "Ready"
+          },
+          "503": {
+            "description": "Storage is unavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AccountResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "owner",
+          "currency",
+          "balance_minor",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "example": "customer"
+          },
+          "owner": {
+            "type": "string",
+            "example": "Firuz Rahimov"
+          },
+          "currency": {
+            "type": "string",
+            "example": "TJS"
+          },
+          "balance_minor": {
+            "type": "integer",
+            "format": "int64",
+            "example": 75000
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "DepositRequest": {
+        "type": "object",
+        "required": [
+          "amount_minor",
+          "currency"
+        ],
+        "properties": {
+          "amount_minor": {
+            "type": "integer",
+            "format": "int64",
+            "example": 100000,
+            "minimum": 1
+          },
+          "currency": {
+            "type": "string",
+            "example": "TJS"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EntryPageResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntryResponse"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "EntryResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "transfer_id",
+          "kind",
+          "counterparty",
+          "delta_minor",
+          "balance_after_minor",
+          "currency",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "transfer_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "example": "transfer"
+          },
+          "counterparty": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "delta_minor": {
+            "type": "integer",
+            "format": "int64",
+            "example": -25000
+          },
+          "balance_after_minor": {
+            "type": "integer",
+            "format": "int64",
+            "example": 75000
+          },
+          "currency": {
+            "type": "string",
+            "example": "TJS"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "OpenAccountRequest": {
+        "type": "object",
+        "required": [
+          "owner",
+          "currency"
+        ],
+        "properties": {
+          "owner": {
+            "type": "string",
+            "example": "Firuz Rahimov",
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "currency": {
+            "type": "string",
+            "example": "TJS",
+            "pattern": "^[A-Z]{3}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Problem": {
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "example": "insufficient_funds"
+          },
+          "title": {
+            "type": "string",
+            "example": "insufficient funds: available 75000, requested 500000"
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "example": 422,
+            "minimum": 0
+          }
+        }
+      },
+      "TransferRequest": {
+        "type": "object",
+        "required": [
+          "from",
+          "to",
+          "amount_minor",
+          "currency"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "to": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "amount_minor": {
+            "type": "integer",
+            "format": "int64",
+            "example": 25000,
+            "minimum": 1
+          },
+          "currency": {
+            "type": "string",
+            "example": "TJS"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TransferResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "from",
+          "to",
+          "amount_minor",
+          "currency"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "example": "transfer"
+          },
+          "from": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "to": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "amount_minor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "currency": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "accounts",
+      "description": "Accounts, deposits and statements"
+    },
+    {
+      "name": "transfers",
+      "description": "Money transfers between accounts"
+    },
+    {
+      "name": "health",
+      "description": "Kubernetes probes"
+    }
+  ]
+}

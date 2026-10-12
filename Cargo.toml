@@ -30,6 +30,8 @@ tower-http = { version = "0.6", features = ["trace", "request-id", "timeout", "c
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v7", "serde"] }
+utoipa = { version = "6", features = ["axum_extras", "uuid", "time", "preserve_order", "preserve_path_order"] }
+utoipa-swagger-ui = { version = "10", features = ["axum", "vendored"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

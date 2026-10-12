@@ -7,6 +7,7 @@ use axum::{
 use ledger_application::AppError;
 use ledger_domain::DomainError;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -32,11 +33,14 @@ impl From<PathRejection> for ApiError {
     }
 }
 
-#[derive(Serialize)]
-struct Problem {
+#[derive(Serialize, ToSchema)]
+pub struct Problem {
     #[serde(rename = "type")]
+    #[schema(example = "insufficient_funds")]
     kind: &'static str,
+    #[schema(example = "insufficient funds: available 75000, requested 500000")]
     title: String,
+    #[schema(example = 422)]
     status: u16,
 }
 

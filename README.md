@@ -65,6 +65,7 @@ The domain is tested in milliseconds, and the storage can be swapped without tou
 - **Double entry:** a deposit is a transfer from the currency's system account. The sum of balances per currency is always `0`, and so is the sum of entries. Verified by tests and by reconciliation in the database.
 - **Defense in depth:** even with a bug in the code, the database rejects a negative customer balance (`CHECK`) and a duplicate key (`UNIQUE`).
 - **Compile-time checked SQL:** every query uses `sqlx::query!` / `query_as!`, so a typo in a column name, a wrong parameter type or a nullable column read into a non-`Option` field is a **compile error**, not a production incident. Query metadata is cached in `.sqlx/` (committed), and `.cargo/config.toml` sets `SQLX_OFFLINE=true`, so building never needs a running database — on a laptop, in Docker or in CI. CI fails if the cache is stale.
+- **API contract generated from code:** the OpenAPI spec is built by `utoipa` from the handlers and DTOs (`#[utoipa::path]`, `ToSchema`), so it cannot drift from the implementation. Tests check that every documented operation is actually routed and that the committed snapshot is current. Swagger UI is vendored — no network access at build time.
 - **Native `async fn` in traits** instead of `async_trait`; static dispatch through generics.
 - **UUIDv7** — time-ordered, index-friendly ids.
 - **Errors:** `thiserror` per layer; the API returns `application/problem+json` and never leaks internal details.
@@ -92,6 +93,10 @@ and 20 parallel transfers, then prints a paginated account statement.
 Sample requests are in `requests.http` (RustRover or the VS Code REST Client extension).
 
 ## API
+
+Interactive docs: **`/swagger-ui/`** (e.g. http://localhost:8080/swagger-ui/). The OpenAPI 3.1 spec is
+served at `/api-docs/openapi.json` and committed as [`crates/api/openapi.json`](crates/api/openapi.json),
+so API changes show up in code review and clients can be generated from it.
 
 | Method | Path | Description |
 |---|---|---|
@@ -126,6 +131,14 @@ cargo sqlx prepare --workspace -- --all-targets
 
 If you forget, the build tells you: `there is no cached data for this query, run cargo sqlx prepare`.
 
+### Changing the API
+
+After changing a handler or a DTO, refresh the committed OpenAPI snapshot:
+
+```bash
+UPDATE_OPENAPI=1 cargo test -p ledger-api --test openapi      # PowerShell: $env:UPDATE_OPENAPI=1; cargo test -p ledger-api --test openapi; Remove-Item Env:UPDATE_OPENAPI
+```
+
 Contract tests (`crates/infrastructure/tests`) run **the same scenarios** against both
 adapters, including 50 concurrent transfers from one account: exactly as many succeed as the
 balance allows, not a single diram more. CI (GitHub Actions) runs all of this against Postgres
@@ -135,7 +148,7 @@ and builds the Docker image.
 
 - [x] Paginated account entry history, `GET /v1/accounts/{id}/entries`
 - [x] `sqlx` compile-time checked queries (`query!` + offline mode)
-- [ ] OpenAPI spec (`utoipa`) and Swagger UI
+- [x] OpenAPI spec (`utoipa`) and Swagger UI
 - [ ] Authentication (JWT), rate limiting (Redis)
 - [ ] Outbox pattern → Kafka/NATS, notification service over gRPC (`tonic`)
 - [ ] Prometheus metrics, OpenTelemetry traces → Grafana/Jaeger
