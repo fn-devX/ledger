@@ -4,6 +4,7 @@ use std::{
 };
 
 use ledger_events::{Envelope, Party, TransferPosted};
+use ledger_telemetry::propagation::{self, Carrier};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -17,6 +18,7 @@ const PER_USER_I64: i64 = 200;
 pub struct Delivered {
     pub user_id: Uuid,
     pub notification: Notification,
+    pub trace: Carrier,
 }
 
 #[derive(Debug)]
@@ -100,7 +102,9 @@ impl Inbox {
             notifications
         };
         let count = delivered.len();
-        for d in delivered {
+        let trace = propagation::current();
+        for mut d in delivered {
+            d.trace.clone_from(&trace);
             let _ = self.live.send(d);
         }
         count
@@ -123,6 +127,7 @@ impl Inbox {
                 "debit"
             };
             Some(Delivered {
+                trace: Carrier::new(),
                 user_id,
                 notification: Notification {
                     id: format!("{}:{suffix}", event.id),

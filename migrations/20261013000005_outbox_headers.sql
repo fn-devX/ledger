@@ -1,0 +1,1 @@
+ALTER TABLE outbox ADD COLUMN headers JSONB NOT NULL DEFAULT '{}'::jsonb;

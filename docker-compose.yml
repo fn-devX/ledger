@@ -41,9 +41,11 @@ services:
       NATS_URL: nats://nats:4222
       JWT_SECRET: ${JWT_SECRET:-insecure-dev-secret-change-me-0123456789}
       GRPC_ADDR: 0.0.0.0:50051
+      METRICS_ADDR: 0.0.0.0:9464
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       LOG_FORMAT: json
       RUST_LOG: info
-    ports: ["50051:50051"]
+    ports: ["50051:50051", "9464:9464"]
     depends_on:
       nats: { condition: service_healthy }
 
@@ -57,6 +59,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-insecure-dev-secret-change-me-0123456789}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@ledger.local}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-ledger-admin-2026}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       LOG_FORMAT: json
       RUST_LOG: info
     ports: ["8080:8080"]
@@ -65,6 +68,35 @@ services:
       redis: { condition: service_healthy }
       nats: { condition: service_healthy }
 
+  jaeger:
+    image: jaegertracing/jaeger:2.20.0
+    ports: ["16686:16686", "4317:4317", "4318:4318"]
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d"]
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports: ["9090:9090"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+  grafana:
+    image: grafana/grafana:12.4.6
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/ledger.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus, jaeger]
+
 volumes:
+  promdata:
   pgdata:
   natsdata:

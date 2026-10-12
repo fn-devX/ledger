@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::{collections::HashMap, future::Future, pin::Pin};
 
 use ledger_domain::{
     Account, AccountId, Currency, Email, IdempotencyKey, Password, Transfer, TransferId,
@@ -93,6 +93,8 @@ pub struct OutboxMessage {
     pub event_id: Uuid,
     pub subject: String,
     pub payload: Vec<u8>,
+    pub headers: HashMap<String, String>,
+    pub created_at: OffsetDateTime,
 }
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -107,6 +109,8 @@ pub trait OutboxStore: Send + Sync + 'static {
         publisher: &'a dyn EventPublisher,
         limit: u32,
     ) -> impl Future<Output = Result<usize, RepoError>> + Send + 'a;
+
+    fn pending(&self) -> impl Future<Output = Result<u64, RepoError>> + Send;
 }
 
 pub trait UserRepository: Send + Sync + 'static {

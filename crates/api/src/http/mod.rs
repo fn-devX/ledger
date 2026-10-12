@@ -4,6 +4,7 @@ mod error;
 mod extract;
 mod handlers;
 mod middleware;
+mod observe;
 pub mod openapi;
 
 use std::{sync::Arc, time::Duration};
@@ -11,7 +12,7 @@ use std::{sync::Arc, time::Duration};
 use axum::{
     Router,
     http::{HeaderName, StatusCode},
-    middleware::from_fn_with_state,
+    middleware::{from_fn, from_fn_with_state},
     routing::{get, post},
 };
 use ledger_application::{
@@ -31,6 +32,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 pub use error::ApiError;
 pub use ledger_auth::JwtKeys;
+pub use ledger_telemetry::metrics::Metrics;
 pub use openapi::ApiDoc;
 
 use middleware::{RateLimiting, Scope, authenticate, rate_limit};
@@ -53,6 +55,7 @@ pub struct HttpSettings {
     pub api_limit: RateLimit,
     pub auth_limit: RateLimit,
     pub trust_proxy_headers: bool,
+    pub metrics: Metrics,
 }
 
 impl std::fmt::Debug for HttpSettings {
@@ -111,16 +114,6 @@ pub fn router<R: Store, G: IdGenerator, H: PasswordHasher>(
 
     let middleware = ServiceBuilder::new()
         .layer(SetRequestIdLayer::new(REQUEST_ID, MakeRequestUuid))
-        .layer(
-            TraceLayer::new_for_http().make_span_with(|req: &axum::http::Request<_>| {
-                let request_id = req
-                    .headers()
-                    .get(REQUEST_ID)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or_default();
-                tracing::info_span!("http", method = %req.method(), uri = %req.uri(), request_id)
-            }),
-        )
         .layer(PropagateRequestIdLayer::new(REQUEST_ID))
         .layer(CatchPanicLayer::new())
         .layer(TimeoutLayer::with_status_code(
@@ -133,6 +126,19 @@ pub fn router<R: Store, G: IdGenerator, H: PasswordHasher>(
         .route("/health/live", get(handlers::live))
         .route("/health/ready", get(handlers::ready::<R, G, H>))
         .with_state(state)
+        .route(
+            "/metrics",
+            get(observe::metrics).with_state(settings.metrics.clone()),
+        )
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        .route_layer(
+            ServiceBuilder::new()
+                .layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(observe::make_span)
+                        .on_response(observe::on_response),
+                )
+                .layer(from_fn(observe::observe)),
+        )
         .layer(middleware)
 }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ledger_domain::{
     Account, AccountId, AccountKind, Currency, IdempotencyKey, Money, Transfer, TransferId,
     TransferKind, post_transfer,
@@ -297,6 +299,8 @@ impl<R: LedgerRepository, G: IdGenerator> LedgerService<R, G> {
             event_id: envelope.id,
             subject: TransferPosted::SUBJECT.to_owned(),
             payload,
+            headers: HashMap::new(),
+            created_at: envelope.occurred_at,
         })
     }
 

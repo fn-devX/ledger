@@ -32,9 +32,12 @@ impl JetStreamPublisher {
 impl EventPublisher for JetStreamPublisher {
     fn publish<'a>(&'a self, message: &'a OutboxMessage) -> BoxFuture<'a, Result<(), BoxError>> {
         Box::pin(async move {
-            let publish = PublishMessage::build()
+            let mut publish = PublishMessage::build()
                 .payload(message.payload.clone().into())
                 .message_id(message.event_id.to_string());
+            for (name, value) in &message.headers {
+                publish = publish.header(name.as_str(), value.as_str());
+            }
             let ack = async {
                 self.js
                     .send_publish(message.subject.clone(), publish)

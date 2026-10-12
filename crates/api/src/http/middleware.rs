@@ -12,6 +12,7 @@ use ledger_application::{
 };
 
 use ledger_auth::JwtKeys;
+use ledger_telemetry::metrics as m;
 
 use super::ApiError;
 
@@ -118,19 +119,30 @@ pub async fn rate_limit(
     next: Next,
 ) -> Response {
     let key = rate_key(&req, &cfg);
+    let scope = match cfg.scope {
+        Scope::Auth => "auth",
+        Scope::Api => "api",
+    };
+    let outcome = |decision: &'static str| {
+        metrics::counter!(m::RATE_LIMIT_DECISIONS, "scope" => scope, "decision" => decision)
+            .increment(1);
+    };
     match cfg.limiter.check(&key, cfg.limit).await {
         Ok(decision) if decision.allowed => {
+            outcome("allowed");
             let mut resp = next.run(req).await;
             set_headers(resp.headers_mut(), &decision);
             resp
         }
         Ok(decision) => {
+            outcome("limited");
             let retry_after = ceil_secs(decision.retry_after).max(1);
             let mut resp = ApiError::RateLimited { retry_after }.into_response();
             set_headers(resp.headers_mut(), &decision);
             resp
         }
         Err(e) => {
+            outcome("error");
             tracing::warn!(error = %e, "rate limiter unavailable, allowing request");
             next.run(req).await
         }

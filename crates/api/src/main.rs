@@ -1,10 +1,9 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use ledger_api::{
     config::Config,
     http::{self, AppState, HttpSettings, JwtKeys, Store},
-    telemetry,
 };
 use ledger_application::{
     AuthService, LedgerService,
@@ -15,13 +14,29 @@ use ledger_infrastructure::{
     Argon2Hasher, InMemoryLedger, InMemoryRateLimiter, JetStreamPublisher, PgLedgerRepository,
     RedisRateLimiter, RelayConfig, UuidV7Generator, run_relay,
 };
+use ledger_telemetry::{
+    TelemetryConfig,
+    metrics::{self as m},
+};
+use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::Notify};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
+    let telemetry = ledger_telemetry::init(TelemetryConfig::from_env(
+        "ledger-api",
+        "info,ledger_api=debug,tower_http=info",
+    ))
+    .map_err(|e| anyhow::anyhow!(e))
+    .context("initialise telemetry")?;
+    let result = run().await;
+    tokio::task::spawn_blocking(move || telemetry.shutdown()).await?;
+    result
+}
+
+async fn run() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
-    telemetry::init(cfg.log_format);
     tracing::debug!(config = ?cfg, "configuration loaded");
 
     if let Some(url) = &cfg.database_url {
@@ -32,12 +47,23 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("using PostgreSQL storage");
         let signal = Arc::new(Notify::new());
         repo.spawn_outbox_listener(signal.clone());
+        tokio::spawn(sample_pool(repo.pool().clone()));
         serve(&cfg, repo, signal).await
     } else {
         tracing::warn!("DATABASE_URL is not set: using in-memory storage, data is lost on restart");
         let repo = InMemoryLedger::new();
         let signal = repo.outbox_signal();
         serve(&cfg, repo, signal).await
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+async fn sample_pool(pool: PgPool) {
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        tick.tick().await;
+        metrics::gauge!(m::DB_POOL_SIZE).set(f64::from(pool.size()));
+        metrics::gauge!(m::DB_POOL_IDLE).set(pool.num_idle() as f64);
     }
 }
 
@@ -111,6 +137,7 @@ async fn serve<R: Store + OutboxStore + Clone>(
         api_limit: RateLimit::per_minute(cfg.api_rate_limit_per_minute),
         auth_limit: RateLimit::per_minute(cfg.auth_rate_limit_per_minute),
         trust_proxy_headers: cfg.trust_proxy_headers,
+        metrics: m::install(),
     };
     let app = http::router(state, &settings);
 

@@ -100,6 +100,7 @@ impl TestApp {
             api_limit: RateLimit::per_minute(limits.api),
             auth_limit: RateLimit::per_minute(limits.auth),
             trust_proxy_headers: true,
+            metrics: ledger_telemetry::metrics::install(),
         };
         Self {
             router: router(state, &settings),

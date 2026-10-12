@@ -15,6 +15,7 @@ ledger-application = { path = "crates/application" }
 ledger-infrastructure = { path = "crates/infrastructure" }
 ledger-auth = { path = "crates/auth" }
 ledger-events = { path = "crates/events" }
+ledger-telemetry = { path = "crates/telemetry" }
 
 anyhow = "1"
 argon2 = "0.6"
@@ -23,7 +24,13 @@ base64 = "0.22"
 dotenvy = "0.15"
 futures = "0.3"
 axum = { version = "0.8", features = ["macros"] }
+http = "1"
 http-body-util = "0.1"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+opentelemetry = "0.33"
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "grpc-tonic"] }
 prost = "0.14"
 prost-types = "0.14"
 protoc-bin-vendored = "3"
@@ -43,6 +50,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "syn
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "request-id", "timeout", "catch-panic", "util"] }
 tracing = "0.1"
+tracing-opentelemetry = { version = "0.34", default-features = false }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 utoipa = { version = "6", features = ["axum_extras", "uuid", "time", "preserve_order", "preserve_path_order"] }

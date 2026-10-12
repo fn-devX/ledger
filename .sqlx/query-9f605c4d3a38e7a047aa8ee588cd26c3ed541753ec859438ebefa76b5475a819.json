@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, event_id, subject, payload FROM outbox\n             WHERE published_at IS NULL\n             ORDER BY id\n             LIMIT $1\n             FOR UPDATE SKIP LOCKED",
+  "query": "SELECT id, event_id, subject, payload, headers, created_at FROM outbox\n             WHERE published_at IS NULL\n             ORDER BY id\n             LIMIT $1\n             FOR UPDATE SKIP LOCKED",
   "describe": {
     "columns": [
       {
@@ -22,6 +22,16 @@
         "ordinal": 3,
         "name": "payload",
         "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "headers",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
@@ -33,8 +43,10 @@
       false,
       false,
       false,
+      false,
+      false,
       false
     ]
   },
-  "hash": "60f2a495cc6546e46d66943b08d11b4b9238dd5a3c701bd6ff6ed6bbfc271dff"
+  "hash": "9f605c4d3a38e7a047aa8ee588cd26c3ed541753ec859438ebefa76b5475a819"
 }

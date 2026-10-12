@@ -10,6 +10,7 @@ use ledger_application::{
     Deposit, ListEntries, OpenAccount, Register, TransferFunds, TransferOutcome,
     ports::{IdGenerator, PasswordHasher},
 };
+use ledger_telemetry::metrics as m;
 use uuid::Uuid;
 
 use super::{
@@ -359,7 +360,17 @@ pub async fn live() -> &'static str {
 }
 
 fn transfer_response(outcome: &TransferOutcome) -> Response {
-    let body = Json(TransferResponse::from(&outcome.transfer));
+    let transfer = &outcome.transfer;
+    if !outcome.replayed {
+        let labels = [
+            ("kind", transfer.kind().as_str().to_owned()),
+            ("currency", transfer.amount().currency().to_string()),
+        ];
+        metrics::counter!(m::TRANSFERS, &labels).increment(1);
+        metrics::counter!(m::TRANSFER_VOLUME, &labels)
+            .increment(transfer.amount().minor().unsigned_abs());
+    }
+    let body = Json(TransferResponse::from(transfer));
     if outcome.replayed {
         let header = (
             HeaderName::from_static("idempotent-replayed"),

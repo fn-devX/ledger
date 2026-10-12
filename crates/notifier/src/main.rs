@@ -7,7 +7,8 @@ use ledger_notifier::{
     inbox::Inbox,
     projection,
 };
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use ledger_telemetry::{TelemetryConfig, metrics::Metrics};
+use tokio::net::TcpListener;
 
 fn var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
@@ -16,17 +17,35 @@ fn var(name: &str) -> Option<String> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,ledger_notifier=debug"));
-    let registry = tracing_subscriber::registry().with(filter);
-    if var("LOG_FORMAT").as_deref() == Some("json") {
-        registry
-            .with(tracing_subscriber::fmt::layer().json())
-            .init();
-    } else {
-        registry.with(tracing_subscriber::fmt::layer()).init();
-    }
+    let telemetry = ledger_telemetry::init(TelemetryConfig::from_env(
+        "ledger-notifier",
+        "info,ledger_notifier=debug",
+    ))
+    .map_err(|e| anyhow::anyhow!(e))
+    .context("initialise telemetry")?;
+    let result = run().await;
+    tokio::task::spawn_blocking(move || telemetry.shutdown()).await?;
+    result
+}
 
+async fn serve_metrics(addr: SocketAddr, metrics: Metrics) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("bind metrics endpoint {addr}"))?;
+    let app = axum::Router::new().route(
+        "/metrics",
+        axum::routing::get(move || std::future::ready(metrics.render())),
+    );
+    tracing::info!(%addr, "Prometheus metrics at /metrics");
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!(error = %e, "metrics endpoint stopped");
+        }
+    });
+    Ok(())
+}
+
+async fn run() -> anyhow::Result<()> {
     let nats_url = var("NATS_URL").unwrap_or_else(|| "nats://127.0.0.1:4222".into());
     let grpc_addr: SocketAddr = var("GRPC_ADDR")
         .unwrap_or_else(|| "0.0.0.0:50051".into())
@@ -38,6 +57,11 @@ async fn main() -> anyhow::Result<()> {
     if secret.len() < 32 {
         bail!("JWT_SECRET must be at least 32 characters");
     }
+    let metrics_addr: SocketAddr = var("METRICS_ADDR")
+        .unwrap_or_else(|| "0.0.0.0:9464".into())
+        .parse()
+        .context("METRICS_ADDR must be host:port")?;
+    serve_metrics(metrics_addr, ledger_telemetry::metrics::install()).await?;
 
     let client = async_nats::connect(&nats_url)
         .await

@@ -4,6 +4,8 @@ A money ledger service: accounts, deposits and transfers with **double-entry boo
 **idempotency** and **optimistic locking**, behind **JWT authentication** and **Redis rate limiting**.
 Every posted transfer becomes an event (**transactional outbox → NATS JetStream**), and a separate
 **notification service** turns events into per-user notifications served over **gRPC** (`tonic`).
+Both services export **Prometheus metrics** and **OpenTelemetry traces**: one trace follows a transfer
+from the HTTP request through Postgres, the outbox, NATS and the notifier to the gRPC stream.
 Built with a hexagonal (clean) architecture.
 
 ## Architecture
@@ -35,9 +37,10 @@ flowchart LR
         argon["Argon2Hasher"]
     end
 
-    subgraph contracts["shared contracts"]
+    subgraph contracts["shared crates"]
         events["crates/events<br/>TransferPosted v1"]
         auth["crates/auth<br/>JWT"]
+        telemetry["crates/telemetry<br/>OTel + Prometheus"]
     end
 
     subgraph notifier["crates/notifier — gRPC service"]
@@ -62,6 +65,8 @@ flowchart LR
     events -.- proj
     auth -.- http
     auth -.- grpc
+    telemetry -.- http
+    telemetry -.- notifier
 ```
 
 **Dependency rule:** arrows point inwards only.
@@ -69,7 +74,7 @@ flowchart LR
 | Crate | Depends on | Knows nothing about |
 |---|---|---|
 | `domain` | nothing (only `uuid`, `thiserror`) | async, database, HTTP, serde |
-| `application` | `domain` | Postgres, Axum |
+| `application` | `domain` | Postgres, Axum, OpenTelemetry (only the `tracing` facade) |
 | `infrastructure` | `application`, `domain`, `sqlx` | HTTP |
 | `api` | everything (wires the app together) | — |
 
@@ -112,6 +117,60 @@ sequenceDiagram
 - **The notifier owns no database.** It replays the stream from the beginning on start (an ordered consumer) and rebuilds its read model, then follows new events live.
 - **gRPC.** `ledger.notifications.v1.Notifications` with `List` and a server-streaming `Subscribe`, authenticated with the same bearer token; each user only ever sees their own notifications. Server reflection is on, so `grpcurl` and Postman discover the API. `protoc` is vendored, so the build needs nothing installed.
 
+### Observability
+
+```mermaid
+flowchart LR
+    api[ledger-api] -- "OTLP gRPC :4317" --> jaeger[(Jaeger)]
+    notifier[ledger-notifier] -- "OTLP gRPC :4317" --> jaeger
+    prom[(Prometheus)] -- "scrape /metrics" --> api
+    prom -- "scrape :9464/metrics" --> notifier
+    grafana[Grafana] --> prom
+    grafana --> jaeger
+```
+
+One transfer in Jaeger, end to end across two services and a broker:
+
+```
+POST /v1/transfers                                 ledger-api        12.8 ms
+├─ redis.ratelimit                                 ledger-api         0.5 ms
+└─ transfer                                        ledger-api        11.6 ms
+   ├─ postgres.find_account                        ledger-api
+   ├─ postgres.find_transfer_by_key                ledger-api
+   └─ postgres.commit_transfer                     ledger-api         4.9 ms
+      └─ publish ledger.transfer.posted            ledger-api (relay) 1.1 ms
+         └─ process ledger.transfer.posted         ledger-notifier    0.6 ms
+            └─ push .../Notifications/Subscribe    ledger-notifier
+```
+
+- **Context crosses every hop with W3C `traceparent`.** Incoming HTTP headers become the parent of the server span. The outbox row stores the trace context of the committing request (`outbox.headers`, JSONB), so the relay, which runs later and in another task, publishes as a child of that request. The relay puts its own context into the NATS message headers next to `Nats-Msg-Id`; the notifier continues the trace from them and hands it to the `Subscribe` stream. gRPC calls accept `traceparent` in metadata.
+- **Every response carries `x-trace-id`**, and every log line inside a request carries `trace_id`, so a `500` reported by a client leads straight to its trace.
+- **Spans follow the OpenTelemetry semantic conventions** (`http.route`, `db.system.name`, `messaging.*`, `rpc.*`, span kinds server/client/producer/consumer), and their names use the route template (`GET /v1/accounts/{id}`), never raw ids.
+- **No exporter, no overhead on the wire.** Without `OTEL_EXPORTER_OTLP_ENDPOINT` spans are still created for propagation and log correlation, but nothing is sent. With it, spans are batched in a background thread. Probes and `/metrics` are not traced.
+- **The notifier does not trace its start-up replay**, otherwise every restart would attach spans to old traces; replayed events are only counted (`outcome="replayed"`).
+
+Metrics (`metrics` facade + Prometheus exporter, latencies as real histograms so `histogram_quantile` works):
+
+| Metric | Labels | What it tells |
+|---|---|---|
+| `http_requests_total`, `http_request_duration_seconds` | `method`, `route`, `status` | traffic, errors, latency per route template |
+| `http_requests_in_flight` | | saturation |
+| `ratelimit_decisions_total` | `scope`, `decision` | allowed / limited (`429`) / error (Redis down, failed open) |
+| `ledger_transfers_total`, `ledger_transfer_volume_minor_total` | `kind`, `currency` | business throughput; replays are not counted |
+| `ledger_outbox_pending` | | backlog; grows while NATS is down — the alert to have |
+| `ledger_outbox_published_total`, `ledger_outbox_publish_failures_total` | `subject` | relay health |
+| `ledger_outbox_lag_seconds` | | commit → broker ack |
+| `notifier_event_lag_seconds` | | commit → notification ready, end to end |
+| `notifier_events_total` | `type`, `outcome` | projected, duplicate, replayed, skipped, malformed |
+| `notifier_subscribers` | | open `Subscribe` streams |
+| `grpc_server_requests_total`, `grpc_server_handling_seconds` | `method`, `code` | gRPC traffic and errors |
+| `db_pool_connections`, `db_pool_idle_connections` | | connection pool usage |
+
+Grafana starts with the **Ledger overview** dashboard provisioned from `deploy/grafana` (no login locally):
+request rate, 5xx share, p50/p95/p99 latency, postings and money moved per minute, rate-limit decisions,
+outbox backlog and publishing, delivery lag, notifier outcomes, gRPC calls and the DB pool.
+It links to Jaeger for traces.
+
 ### Key decisions
 
 - **Money is `i64` in minor units** (dirams, cents) — never `f64`.
@@ -127,7 +186,7 @@ sequenceDiagram
 - **Errors:** `thiserror` per layer; the API returns `application/problem+json` and never leaks internal details.
 - **Keyset (cursor) pagination** for statements: `WHERE id < cursor ORDER BY id DESC` runs as a backward index scan on `(account_id, id)`, so page 1000 is as fast as page 1 and rows inserted meanwhile never shift pages (unlike `OFFSET`). The cursor is opaque to clients.
 - **Running balance** is stored on each entry (`balance_after`) at write time; the migration that added it backfilled existing rows with a window function.
-- **Observability:** `tracing` spans for every request with `x-request-id`; JSON logs in production.
+- **Observability:** `tracing` is the single instrumentation API; the same spans become log lines (JSON in production, with `trace_id` and `x-request-id`) and OpenTelemetry spans. See [Observability](#observability).
 
 ## Running (Windows / Linux / macOS)
 
@@ -137,8 +196,24 @@ Requires Rust (stable) and Docker Desktop.
 docker compose up -d postgres redis nats
 cp .env.example .env               # PowerShell: copy .env.example .env
 cargo run -p ledger-api            # http://localhost:8080/swagger-ui/
-cargo run -p ledger-notifier       # gRPC on 127.0.0.1:50051
+cargo run -p ledger-notifier       # gRPC on 127.0.0.1:50051, metrics on 127.0.0.1:9464
 ```
+
+Metrics and traces:
+
+```bash
+docker compose up -d jaeger prometheus grafana
+```
+
+| | |
+|---|---|
+| Grafana, dashboard **Ledger overview** | http://localhost:3000 |
+| Jaeger, traces | http://localhost:16686 |
+| Prometheus | http://localhost:9090 |
+| Raw metrics | http://localhost:8080/metrics, http://localhost:9464/metrics |
+
+Prometheus scrapes services started with `cargo run` through `host.docker.internal`, and the ones from
+`--profile full` by service name; whichever is not running shows as down in Targets.
 
 Watch your notifications live (log in through the API first and pass the access token):
 
@@ -152,6 +227,7 @@ Log in through `POST /v1/auth/login`, then press **Authorize** in Swagger UI and
 
 Every dependency is optional for local experiments: without `DATABASE_URL` storage is in-memory,
 without `REDIS_URL` rate limits are per process, without `NATS_URL` events stay in the outbox,
+without `OTEL_EXPORTER_OTLP_ENDPOINT` traces are not exported,
 without `JWT_SECRET` a random key is generated (tokens stop working after a restart; the notifier
 requires the same `JWT_SECRET` as the API).
 Everything in containers: `docker compose --profile full up --build`.
@@ -227,7 +303,7 @@ and builds the Docker image.
 - [x] OpenAPI spec (`utoipa`) and Swagger UI
 - [x] Authentication (JWT), rate limiting (Redis)
 - [x] Outbox pattern → NATS JetStream, notification service over gRPC (`tonic`)
-- [ ] Prometheus metrics, OpenTelemetry traces → Grafana/Jaeger
+- [x] Prometheus metrics, OpenTelemetry traces → Grafana/Jaeger
 - [ ] Property tests (`proptest`), load testing (k6)
 - [ ] Kubernetes manifests / Helm
 - [ ] Sharding the system account (hotspot under heavy deposit load)

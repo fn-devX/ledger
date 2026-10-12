@@ -11,6 +11,7 @@ use ledger_application::ports::{
 use ledger_domain::{
     Account, AccountId, Currency, Email, Entry, IdempotencyKey, Transfer, TransferId, User, UserId,
 };
+use ledger_telemetry::propagation;
 use time::OffsetDateTime;
 use tokio::sync::Notify;
 
@@ -139,7 +140,9 @@ impl State {
                 },
             ));
         }
-        self.outbox.push((event.clone(), false));
+        let mut event = event.clone();
+        event.headers.extend(propagation::current());
+        self.outbox.push((event, false));
         Ok(())
     }
 
@@ -291,5 +294,9 @@ impl OutboxStore for InMemoryLedger {
             sent += 1;
         }
         Ok(sent)
+    }
+
+    fn pending(&self) -> impl Future<Output = Result<u64, RepoError>> + Send {
+        ready(Ok(self.pending_events() as u64))
     }
 }

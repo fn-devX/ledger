@@ -1,6 +1,6 @@
 [package]
 name = "ledger-infrastructure"
-description = "Adapters: PostgreSQL (sqlx), in-memory storage, UUIDv7 generator."
+description = "Adapters: PostgreSQL (sqlx), Redis, NATS JetStream, in-memory storage, outbox relay."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,8 @@ async-nats.workspace = true
 ledger-events = { workspace = true, features = ["jetstream"] }
 serde_json.workspace = true
 argon2.workspace = true
+ledger-telemetry.workspace = true
+metrics.workspace = true
 redis.workspace = true
 tokio.workspace = true
 time.workspace = true

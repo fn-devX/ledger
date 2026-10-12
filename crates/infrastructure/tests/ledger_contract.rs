@@ -13,7 +13,10 @@ use ledger_application::{
 };
 use ledger_domain::{DomainError, Password, Role, TransferKind};
 use ledger_events::{RawEnvelope, TransferPosted};
-use ledger_infrastructure::{InMemoryLedger, PgLedgerRepository, UuidV7Generator};
+use ledger_infrastructure::{InMemoryLedger, PgLedgerRepository, TracedPublisher, UuidV7Generator};
+use ledger_telemetry::{install_local_subscriber, propagation};
+use time::OffsetDateTime;
+use tracing::Instrument;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -637,6 +640,34 @@ async fn outbox_survives_a_broker_outage<R: Repo>(w: World<R>) {
     );
 }
 
+async fn outbox_carries_the_trace_context<R: Repo>(w: World<R>) {
+    install_local_subscriber();
+    let cur = currency();
+    let firuz = w.customer("Firuz").await;
+    let a = w.open(&firuz, &cur).await;
+    let request = tracing::info_span!("request");
+    let trace_id = propagation::trace_id(&request).unwrap();
+    w.deposit(a, 1_000, &cur).instrument(request).await;
+
+    assert_eq!(w.events_for(&cur, 1).await.len(), 1);
+    let traceparent = collector()
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|m| {
+            RawEnvelope::parse(&m.payload)
+                .and_then(RawEnvelope::decode::<TransferPosted>)
+                .is_ok_and(|e| e.data.currency == cur)
+        })
+        .and_then(|m| m.headers.get("traceparent").cloned())
+        .expect("traceparent stored with the event");
+    assert!(
+        traceparent.contains(&trace_id),
+        "{traceparent} / {trace_id}"
+    );
+}
+
 async fn outbox_matches_concurrent_commits<R: Repo>(w: World<R>) {
     let cur = currency();
     let (firuz, nigina) = (w.customer("Firuz").await, w.customer("Nigina").await);
@@ -711,7 +742,30 @@ contract!(
     outbox_records_exactly_the_committed_transfers,
     outbox_survives_a_broker_outage,
     outbox_matches_concurrent_commits,
+    outbox_carries_the_trace_context,
 );
+
+#[tokio::test]
+async fn relay_publishes_as_a_child_of_the_committing_request() {
+    install_local_subscriber();
+    let request = tracing::info_span!("request");
+    let headers = request.in_scope(propagation::current);
+    let tap = Arc::new(Collector::default());
+    let publisher = TracedPublisher::new(tap.clone(), "test");
+    let message = OutboxMessage {
+        event_id: Uuid::now_v7(),
+        subject: "ledger.test".into(),
+        payload: b"{}".to_vec(),
+        headers: headers.clone(),
+        created_at: OffsetDateTime::now_utc(),
+    };
+    publisher.publish(&message).await.unwrap();
+
+    let sent = tap.0.lock().unwrap()[0].headers["traceparent"].clone();
+    let original = &headers["traceparent"];
+    assert_eq!(sent[3..35], original[3..35], "same trace");
+    assert_ne!(sent[36..52], original[36..52], "a new producer span");
+}
 
 #[tokio::test]
 async fn double_entry_invariant_holds_in_memory() {

@@ -5,6 +5,7 @@ use ledger_application::{
     ratelimit::{RateDecision, RateFuture, RateLimit, RateLimiter, gcra},
 };
 use redis::{Script, aio::ConnectionManager};
+use tracing::Instrument;
 
 const PRUNE_THRESHOLD: usize = 10_000;
 
@@ -101,22 +102,30 @@ impl RedisRateLimiter {
 
 impl RateLimiter for RedisRateLimiter {
     fn check<'a>(&'a self, key: &'a str, limit: RateLimit) -> RateFuture<'a> {
-        Box::pin(async move {
-            let mut conn = self.conn.clone();
-            let (allowed, retry_after, used): (i64, i64, i64) = self
-                .script
-                .key(format!("{}{key}", self.prefix))
-                .arg(limit.emission_interval_us())
-                .arg(limit.burst)
-                .invoke_async(&mut conn)
-                .await
-                .map_err(storage)?;
-            Ok(RateDecision::from_raw(
-                &limit,
-                allowed == 1,
-                u64::try_from(retry_after).unwrap_or(0),
-                u64::try_from(used).unwrap_or(0),
-            ))
-        })
+        Box::pin(
+            async move {
+                let mut conn = self.conn.clone();
+                let (allowed, retry_after, used): (i64, i64, i64) = self
+                    .script
+                    .key(format!("{}{key}", self.prefix))
+                    .arg(limit.emission_interval_us())
+                    .arg(limit.burst)
+                    .invoke_async(&mut conn)
+                    .await
+                    .map_err(storage)?;
+                Ok(RateDecision::from_raw(
+                    &limit,
+                    allowed == 1,
+                    u64::try_from(retry_after).unwrap_or(0),
+                    u64::try_from(used).unwrap_or(0),
+                ))
+            }
+            .instrument(tracing::info_span!(
+                "redis.ratelimit",
+                otel.kind = "client",
+                db.system.name = "redis",
+                db.operation.name = "EVALSHA",
+            )),
+        )
     }
 }

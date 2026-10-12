@@ -43,11 +43,13 @@ async fn off_runtime<T: Send + 'static>(
 }
 
 impl PasswordHasher for Argon2Hasher {
+    #[tracing::instrument(name = "argon2.hash", skip_all)]
     async fn hash(&self, password: &Password) -> Result<String, BoxError> {
         let password = password.expose().to_owned();
         off_runtime(move || hash_blocking(&password)).await
     }
 
+    #[tracing::instrument(name = "argon2.verify", skip_all)]
     async fn verify(&self, password: &str, hash: &str) -> Result<bool, BoxError> {
         let (password, hash) = (password.to_owned(), hash.to_owned());
         off_runtime(move || verify_blocking(&password, &hash)).await

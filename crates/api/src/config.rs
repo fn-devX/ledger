@@ -2,12 +2,6 @@ use std::{net::SocketAddr, time::Duration};
 
 use anyhow::{Context, bail};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogFormat {
-    Pretty,
-    Json,
-}
-
 #[derive(Clone)]
 pub struct AdminSeed {
     pub email: String,
@@ -30,7 +24,6 @@ pub struct Config {
     pub database_url: Option<String>,
     pub db_max_connections: u32,
     pub request_timeout: Duration,
-    pub log_format: LogFormat,
     pub jwt_secret: Option<String>,
     pub access_token_ttl: Duration,
     pub admin: Option<AdminSeed>,
@@ -81,10 +74,6 @@ impl Config {
             .unwrap_or_else(|| "0.0.0.0:8080".into())
             .parse()
             .context("HTTP_ADDR must be host:port")?;
-        let log_format = match var("LOG_FORMAT").as_deref() {
-            Some("json") => LogFormat::Json,
-            _ => LogFormat::Pretty,
-        };
         let jwt_secret = var("JWT_SECRET");
         if jwt_secret.as_ref().is_some_and(|s| s.len() < 32) {
             bail!("JWT_SECRET must be at least 32 characters");
@@ -103,7 +92,6 @@ impl Config {
             database_url: var("DATABASE_URL"),
             db_max_connections: number("DB_MAX_CONNECTIONS", 10)?,
             request_timeout: Duration::from_secs(number("REQUEST_TIMEOUT_SECS", 10)?),
-            log_format,
             jwt_secret,
             access_token_ttl: Duration::from_secs(number("ACCESS_TOKEN_TTL_SECS", 3600)?),
             admin,

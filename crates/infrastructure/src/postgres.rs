@@ -8,6 +8,7 @@ use ledger_domain::{
     Account, AccountId, AccountKind, Currency, Email, IdempotencyKey, Money, Role, Transfer,
     TransferId, TransferKind, User, UserId,
 };
+use ledger_telemetry::propagation;
 use sqlx::{
     PgPool,
     postgres::{PgListener, PgPoolOptions},
@@ -171,6 +172,7 @@ fn corrupt(msg: String) -> RepoError {
 }
 
 impl LedgerRepository for PgLedgerRepository {
+    #[tracing::instrument(name = "postgres.insert_account", skip_all, fields(otel.kind = "client", db.system.name = "postgresql", db.operation.name = "insert_account"))]
     async fn insert_account(&self, a: &Account) -> Result<(), RepoError> {
         let currency = a.currency();
         sqlx::query!(
@@ -190,6 +192,7 @@ impl LedgerRepository for PgLedgerRepository {
         Ok(())
     }
 
+    #[tracing::instrument(name = "postgres.find_account", skip_all, fields(otel.kind = "client", db.system.name = "postgresql", db.operation.name = "find_account"))]
     async fn find_account(&self, id: AccountId) -> Result<Option<Account>, RepoError> {
         sqlx::query_as!(
             AccountRow,
@@ -203,6 +206,7 @@ impl LedgerRepository for PgLedgerRepository {
         .transpose()
     }
 
+    #[tracing::instrument(name = "postgres.list_accounts", skip_all, fields(otel.kind = "client", db.system.name = "postgresql", db.operation.name = "list_accounts"))]
     async fn list_accounts(&self, holder: UserId) -> Result<Vec<Account>, RepoError> {
         sqlx::query_as!(
             AccountRow,
@@ -218,6 +222,7 @@ impl LedgerRepository for PgLedgerRepository {
         .collect()
     }
 
+    #[tracing::instrument(name = "postgres.system_account", skip_all, fields(otel.kind = "client", db.system.name = "postgresql", db.operation.name = "system_account"))]
     async fn system_account(
         &self,
         currency: Currency,
@@ -246,6 +251,7 @@ impl LedgerRepository for PgLedgerRepository {
         .try_into()
     }
 
+    #[tracing::instrument(name = "postgres.find_transfer", skip_all, fields(otel.kind = "client", db.system.name = "postgresql", db.operation.name = "find_transfer"))]
     async fn find_transfer(&self, id: TransferId) -> Result<Option<Transfer>, RepoError> {
         sqlx::query_as!(
             TransferRow,
@@ -260,6 +266,7 @@ impl LedgerRepository for PgLedgerRepository {
         .transpose()
     }
 
+    #[tracing::instrument(name = "postgres.find_transfer_by_key", skip_all, fields(otel.kind = "client", db.system.name = "postgresql", db.operation.name = "find_transfer_by_key"))]
     async fn find_transfer_by_key(
         &self,
         initiator: UserId,
@@ -279,6 +286,7 @@ impl LedgerRepository for PgLedgerRepository {
         .transpose()
     }
 
+    #[tracing::instrument(name = "postgres.commit_transfer", skip_all, fields(otel.kind = "client", db.system.name = "postgresql", db.operation.name = "commit_transfer"))]
     async fn commit_transfer(
         &self,
         t: &Transfer,
@@ -352,11 +360,17 @@ impl LedgerRepository for PgLedgerRepository {
         }
 
         let payload: serde_json::Value = serde_json::from_slice(&event.payload).map_err(storage)?;
+        let mut headers = event.headers.clone();
+        headers.extend(propagation::current());
+        let headers = serde_json::to_value(headers).map_err(storage)?;
         sqlx::query!(
-            "INSERT INTO outbox (event_id, subject, payload) VALUES ($1, $2, $3)",
+            "INSERT INTO outbox (event_id, subject, payload, headers, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
             event.event_id,
             event.subject,
             payload,
+            headers,
+            event.created_at,
         )
         .execute(&mut *tx)
         .await
@@ -369,6 +383,7 @@ impl LedgerRepository for PgLedgerRepository {
         tx.commit().await.map_err(storage)
     }
 
+    #[tracing::instrument(name = "postgres.list_entries", skip_all, fields(otel.kind = "client", db.system.name = "postgresql", db.operation.name = "list_entries"))]
     async fn list_entries(&self, query: EntryQuery) -> Result<Vec<EntryRecord>, RepoError> {
         sqlx::query_as!(
             EntryRow,
@@ -426,6 +441,7 @@ impl TryFrom<UserRow> for User {
 }
 
 impl UserRepository for PgLedgerRepository {
+    #[tracing::instrument(name = "postgres.insert_user", skip_all, fields(otel.kind = "client", db.system.name = "postgresql", db.operation.name = "insert_user"))]
     async fn insert_user(&self, user: &User) -> Result<(), RepoError> {
         sqlx::query!(
             "INSERT INTO users (id, email, name, role, password_hash) VALUES ($1, $2, $3, $4, $5)",
@@ -444,6 +460,7 @@ impl UserRepository for PgLedgerRepository {
         Ok(())
     }
 
+    #[tracing::instrument(name = "postgres.find_user_by_email", skip_all, fields(otel.kind = "client", db.system.name = "postgresql", db.operation.name = "find_user_by_email"))]
     async fn find_user_by_email(&self, email: &Email) -> Result<Option<User>, RepoError> {
         sqlx::query_as!(
             UserRow,
@@ -466,7 +483,7 @@ impl OutboxStore for PgLedgerRepository {
     ) -> Result<usize, RepoError> {
         let mut tx = self.pool.begin().await.map_err(storage)?;
         let rows = sqlx::query!(
-            "SELECT id, event_id, subject, payload FROM outbox
+            "SELECT id, event_id, subject, payload, headers, created_at FROM outbox
              WHERE published_at IS NULL
              ORDER BY id
              LIMIT $1
@@ -484,6 +501,8 @@ impl OutboxStore for PgLedgerRepository {
                 event_id: row.event_id,
                 subject: row.subject,
                 payload: serde_json::to_vec(&row.payload).map_err(storage)?,
+                headers: serde_json::from_value(row.headers).unwrap_or_default(),
+                created_at: row.created_at,
             };
             match publisher.publish(&message).await {
                 Ok(()) => sent.push(row.id),
@@ -508,5 +527,15 @@ impl OutboxStore for PgLedgerRepository {
             Some(e) => Err(RepoError::Storage(e)),
             None => Ok(sent.len()),
         }
+    }
+
+    async fn pending(&self) -> Result<u64, RepoError> {
+        let count = sqlx::query_scalar!(
+            r#"SELECT count(*) AS "count!" FROM outbox WHERE published_at IS NULL"#
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(u64::try_from(count).unwrap_or_default())
     }
 }

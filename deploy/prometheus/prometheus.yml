@@ -1,0 +1,24 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: ledger-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8080", "host.docker.internal:8090"]
+        labels: { run: local }
+      - targets: ["api:8080"]
+        labels: { run: compose }
+
+  - job_name: ledger-notifier
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9464"]
+        labels: { run: local }
+      - targets: ["notifier:9464"]
+        labels: { run: compose }
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
