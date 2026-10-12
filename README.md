@@ -2,6 +2,8 @@
 
 A money ledger service: accounts, deposits and transfers with **double-entry bookkeeping**,
 **idempotency** and **optimistic locking**, behind **JWT authentication** and **Redis rate limiting**.
+Every posted transfer becomes an event (**transactional outbox → NATS JetStream**), and a separate
+**notification service** turns events into per-user notifications served over **gRPC** (`tonic`).
 Built with a hexagonal (clean) architecture.
 
 ## Architecture
@@ -9,41 +11,57 @@ Built with a hexagonal (clean) architecture.
 ```mermaid
 flowchart LR
     client([HTTP client]) --> api
+    watcher([gRPC client]) --> notifier
 
-    subgraph api["crates/api — outer layer"]
+    subgraph api["crates/api — HTTP service"]
         direction TB
-        http["HTTP (Axum)<br/>DTOs, RFC 9457 errors, JWT, rate limit middleware"]
-        root["main.rs — composition root<br/>config, tracing, graceful shutdown"]
+        http["Axum: DTOs, RFC 9457 errors,<br/>JWT and rate limit middleware"]
+        root["main.rs — composition root,<br/>spawns the outbox relay"]
     end
 
     subgraph app["crates/application — use cases"]
-        svc["LedgerService + AuthService<br/>use cases with authorization"]
-        ports{{"ports:<br/>LedgerRepository, UserRepository,<br/>PasswordHasher, RateLimiter, IdGenerator"}}
+        svc["LedgerService + AuthService<br/>authorization, builds events"]
+        ports{{"ports: LedgerRepository, UserRepository,<br/>OutboxStore, EventPublisher,<br/>PasswordHasher, RateLimiter"}}
     end
 
     subgraph dom["crates/domain — core"]
-        model["Money, Account, Transfer,<br/>User, Email, Password, post_transfer()"]
+        model["Money, Account, Transfer,<br/>User, post_transfer()"]
     end
 
     subgraph infra["crates/infrastructure — adapters"]
-        pg["PgLedgerRepository (sqlx)"]
-        mem["InMemoryLedger"]
-        argon["Argon2Hasher"]
+        pg["PgLedgerRepository (sqlx)<br/>+ outbox relay"]
+        js["JetStreamPublisher"]
         redis["RedisRateLimiter (GCRA, Lua)"]
-        ids["UuidV7Generator"]
+        argon["Argon2Hasher"]
+    end
+
+    subgraph contracts["shared contracts"]
+        events["crates/events<br/>TransferPosted v1"]
+        auth["crates/auth<br/>JWT"]
+    end
+
+    subgraph notifier["crates/notifier — gRPC service"]
+        proj["projection from JetStream"]
+        grpc["Notifications: List, Subscribe (stream)"]
     end
 
     http --> svc
     svc --> model
     svc --> ports
+    svc -. emits .-> events
     pg -. implements .-> ports
-    mem -. implements .-> ports
-    ids -. implements .-> ports
-    argon -. implements .-> ports
+    js -. implements .-> ports
     redis -. implements .-> ports
+    argon -. implements .-> ports
     root --> infra
     pg --> db[(PostgreSQL)]
     redis --> rds[(Redis)]
+    js --> nats[(NATS JetStream)]
+    nats --> proj
+    proj --> grpc
+    events -.- proj
+    auth -.- http
+    auth -.- grpc
 ```
 
 **Dependency rule:** arrows point inwards only.
@@ -63,7 +81,36 @@ The domain is tested in milliseconds, and the storage can be swapped without tou
 2. **Use case** looks up a transfer with that key: same parameters → returns it (`200`, `Idempotent-Replayed: true`); different parameters → `409`.
 3. Loads both accounts and calls the **pure domain function** `post_transfer`: currency, sufficient funds, overflow. All checks run before any mutation.
 4. **Repository**, in a single transaction: `UPDATE ... WHERE version = loaded_version` (ordered by id to avoid deadlocks), then `INSERT` the transfer and its two entries.
-5. A version conflict or a race on the key → retry from step 2 (up to N attempts).
+5. The same transaction inserts a `transfer.posted` event into the **outbox** and fires `NOTIFY`.
+6. A version conflict or a race on the key → retry from step 2 (up to N attempts).
+
+### Events and notifications
+
+```mermaid
+sequenceDiagram
+    participant API as ledger-api
+    participant PG as PostgreSQL
+    participant R as outbox relay
+    participant JS as NATS JetStream
+    participant N as ledger-notifier
+    participant C as gRPC client
+    API->>PG: BEGIN, update balances, insert transfer, entries, outbox row, NOTIFY, COMMIT
+    PG-->>R: NOTIFY ledger_outbox
+    R->>PG: SELECT ... FOR UPDATE SKIP LOCKED
+    R->>JS: publish (Nats-Msg-Id = event id)
+    JS-->>R: ack
+    R->>PG: mark published, COMMIT
+    JS->>N: ordered consumer
+    N->>N: project into per-user notifications
+    N-->>C: Subscribe stream: "You received 250.00 TJS from Firuz"
+```
+
+- **Transactional outbox.** The money and the event are committed together, so there is never a transfer without an event or an event without a transfer — no dual-write problem.
+- **Relay.** Wakes up on Postgres `LISTEN/NOTIFY` (milliseconds, measured ~20 ms from HTTP 201 to the gRPC client), polls as a fallback, claims rows with `FOR UPDATE SKIP LOCKED` so several relays can run side by side, and backs off exponentially while the broker is down. The API keeps accepting transfers during a broker outage; events wait in the outbox.
+- **Effectively once.** Delivery is at-least-once, and JetStream drops redeliveries of the same `Nats-Msg-Id` within a 10-minute window; the notifier is idempotent by event id on top of that.
+- **Contracts are code.** `crates/events` holds the versioned envelope (`id`, `type`, `version`, `occurred_at`, `data`) and `TransferPosted v1`; both services compile against it. `crates/auth` holds JWT verification, so the notifier accepts the same tokens as the API.
+- **The notifier owns no database.** It replays the stream from the beginning on start (an ordered consumer) and rebuilds its read model, then follows new events live.
+- **gRPC.** `ledger.notifications.v1.Notifications` with `List` and a server-streaming `Subscribe`, authenticated with the same bearer token; each user only ever sees their own notifications. Server reflection is on, so `grpcurl` and Postman discover the API. `protoc` is vendored, so the build needs nothing installed.
 
 ### Key decisions
 
@@ -87,17 +134,26 @@ The domain is tested in milliseconds, and the storage can be swapped without tou
 Requires Rust (stable) and Docker Desktop.
 
 ```bash
-docker compose up -d postgres redis
+docker compose up -d postgres redis nats
 cp .env.example .env               # PowerShell: copy .env.example .env
 cargo run -p ledger-api            # http://localhost:8080/swagger-ui/
+cargo run -p ledger-notifier       # gRPC on 127.0.0.1:50051
+```
+
+Watch your notifications live (log in through the API first and pass the access token):
+
+```bash
+cargo run -p ledger-notifier --bin notify-watch -- --token <JWT>
+grpcurl -plaintext -H "authorization: Bearer <JWT>" 127.0.0.1:50051 ledger.notifications.v1.Notifications/Subscribe
 ```
 
 On start the service applies migrations and creates the admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
 Log in through `POST /v1/auth/login`, then press **Authorize** in Swagger UI and paste the token.
 
 Every dependency is optional for local experiments: without `DATABASE_URL` storage is in-memory,
-without `REDIS_URL` rate limits are per process, without `JWT_SECRET` a random key is generated
-(tokens stop working after a restart).
+without `REDIS_URL` rate limits are per process, without `NATS_URL` events stay in the outbox,
+without `JWT_SECRET` a random key is generated (tokens stop working after a restart; the notifier
+requires the same `JWT_SECRET` as the API).
 Everything in containers: `docker compose --profile full up --build`.
 
 On Windows you can just double-click `scripts\run.cmd` (starts the service on port 8090),
@@ -134,7 +190,7 @@ Foreign accounts and transfers answer `404`, not `403`, so their ids cannot be p
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings   # clippy::pedantic enabled
 cargo test --workspace                                  # in-memory
-DATABASE_URL=postgres://ledger:ledger@localhost:5432/ledger REDIS_URL=redis://localhost:6379 cargo test --workspace  # + Postgres + Redis
+DATABASE_URL=postgres://ledger:ledger@localhost:5432/ledger REDIS_URL=redis://localhost:6379 NATS_URL=nats://localhost:4222 cargo test --workspace  # + Postgres + Redis + NATS
 ```
 
 ### Changing SQL
@@ -170,7 +226,7 @@ and builds the Docker image.
 - [x] `sqlx` compile-time checked queries (`query!` + offline mode)
 - [x] OpenAPI spec (`utoipa`) and Swagger UI
 - [x] Authentication (JWT), rate limiting (Redis)
-- [ ] Outbox pattern → Kafka/NATS, notification service over gRPC (`tonic`)
+- [x] Outbox pattern → NATS JetStream, notification service over gRPC (`tonic`)
 - [ ] Prometheus metrics, OpenTelemetry traces → Grafana/Jaeger
 - [ ] Property tests (`proptest`), load testing (k6)
 - [ ] Kubernetes manifests / Helm

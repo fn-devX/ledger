@@ -8,13 +8,14 @@ use ledger_api::{
 };
 use ledger_application::{
     AuthService, LedgerService,
+    ports::OutboxStore,
     ratelimit::{RateLimit, RateLimiter},
 };
 use ledger_infrastructure::{
-    Argon2Hasher, InMemoryLedger, InMemoryRateLimiter, PgLedgerRepository, RedisRateLimiter,
-    UuidV7Generator,
+    Argon2Hasher, InMemoryLedger, InMemoryRateLimiter, JetStreamPublisher, PgLedgerRepository,
+    RedisRateLimiter, RelayConfig, UuidV7Generator, run_relay,
 };
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Notify};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -29,11 +30,38 @@ async fn main() -> anyhow::Result<()> {
             .context("connect to postgres")?;
         repo.migrate().await.context("run migrations")?;
         tracing::info!("using PostgreSQL storage");
-        serve(&cfg, repo).await
+        let signal = Arc::new(Notify::new());
+        repo.spawn_outbox_listener(signal.clone());
+        serve(&cfg, repo, signal).await
     } else {
         tracing::warn!("DATABASE_URL is not set: using in-memory storage, data is lost on restart");
-        serve(&cfg, InMemoryLedger::new()).await
+        let repo = InMemoryLedger::new();
+        let signal = repo.outbox_signal();
+        serve(&cfg, repo, signal).await
     }
+}
+
+async fn start_outbox_relay<R: OutboxStore + Clone>(
+    cfg: &Config,
+    repo: &R,
+    signal: Arc<Notify>,
+) -> anyhow::Result<()> {
+    let Some(url) = &cfg.nats_url else {
+        tracing::warn!("NATS_URL is not set: events stay in the outbox until a relay runs");
+        return Ok(());
+    };
+    let publisher = JetStreamPublisher::connect(url)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("connect to NATS JetStream")?;
+    tracing::info!("publishing outbox events to NATS JetStream");
+    tokio::spawn(run_relay(
+        repo.clone(),
+        Arc::new(publisher),
+        signal,
+        RelayConfig::default(),
+    ));
+    Ok(())
 }
 
 async fn rate_limiter(cfg: &Config) -> anyhow::Result<Arc<dyn RateLimiter>> {
@@ -49,7 +77,12 @@ async fn rate_limiter(cfg: &Config) -> anyhow::Result<Arc<dyn RateLimiter>> {
     }
 }
 
-async fn serve<R: Store + Clone>(cfg: &Config, repo: R) -> anyhow::Result<()> {
+async fn serve<R: Store + OutboxStore + Clone>(
+    cfg: &Config,
+    repo: R,
+    outbox_signal: Arc<Notify>,
+) -> anyhow::Result<()> {
+    start_outbox_relay(cfg, &repo, outbox_signal).await?;
     let hasher = Argon2Hasher::new().map_err(|e| anyhow::anyhow!(e))?;
     let auth = AuthService::new(repo.clone(), hasher, UuidV7Generator);
     if let Some(admin) = &cfg.admin {

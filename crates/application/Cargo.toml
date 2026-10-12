@@ -8,6 +8,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ledger-events.workspace = true
+serde_json.workspace = true
 time.workspace = true
 ledger-domain.workspace = true
 thiserror.workspace = true

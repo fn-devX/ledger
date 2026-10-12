@@ -3,7 +3,6 @@ mod dto;
 mod error;
 mod extract;
 mod handlers;
-pub mod jwt;
 mod middleware;
 pub mod openapi;
 
@@ -31,7 +30,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 pub use error::ApiError;
-pub use jwt::JwtKeys;
+pub use ledger_auth::JwtKeys;
 pub use openapi::ApiDoc;
 
 use middleware::{RateLimiting, Scope, authenticate, rate_limit};

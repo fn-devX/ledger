@@ -5,16 +5,19 @@ use std::{
 };
 
 use ledger_application::ports::{
-    EntryQuery, EntryRecord, LedgerRepository, RepoError, UserRepository,
+    EntryQuery, EntryRecord, EventPublisher, LedgerRepository, OutboxMessage, OutboxStore,
+    RepoError, UserRepository,
 };
 use ledger_domain::{
     Account, AccountId, Currency, Email, Entry, IdempotencyKey, Transfer, TransferId, User, UserId,
 };
 use time::OffsetDateTime;
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryLedger {
     state: Arc<Mutex<State>>,
+    outbox_signal: Arc<Notify>,
 }
 
 #[derive(Debug, Default)]
@@ -25,6 +28,7 @@ struct State {
     keys: HashMap<(Option<UserId>, String), TransferId>,
     users: HashMap<String, User>,
     entries: Vec<(AccountId, EntryRecord)>,
+    outbox: Vec<(OutboxMessage, bool)>,
 }
 
 impl InMemoryLedger {
@@ -47,6 +51,14 @@ impl InMemoryLedger {
                 delta: e.delta,
             })
             .collect()
+    }
+
+    pub fn outbox_signal(&self) -> Arc<Notify> {
+        self.outbox_signal.clone()
+    }
+
+    pub fn pending_events(&self) -> usize {
+        self.lock().outbox.iter().filter(|(_, sent)| !sent).count()
     }
 
     pub fn accounts(&self) -> Vec<Account> {
@@ -87,6 +99,7 @@ impl State {
         transfer: &Transfer,
         from: &Account,
         to: &Account,
+        event: &OutboxMessage,
     ) -> Result<(), RepoError> {
         for acc in [from, to] {
             let stored = self.accounts.get(&acc.id()).map(Account::version);
@@ -126,6 +139,7 @@ impl State {
                 },
             ));
         }
+        self.outbox.push((event.clone(), false));
         Ok(())
     }
 
@@ -203,8 +217,13 @@ impl LedgerRepository for InMemoryLedger {
         transfer: &Transfer,
         from: &Account,
         to: &Account,
+        event: &OutboxMessage,
     ) -> impl Future<Output = Result<(), RepoError>> + Send {
-        ready(self.lock().commit_transfer(transfer, from, to))
+        let result = self.lock().commit_transfer(transfer, from, to, event);
+        if result.is_ok() {
+            self.outbox_signal.notify_one();
+        }
+        ready(result)
     }
 
     fn list_entries(
@@ -238,5 +257,39 @@ impl UserRepository for InMemoryLedger {
         email: &Email,
     ) -> impl Future<Output = Result<Option<User>, RepoError>> + Send {
         ready(Ok(self.lock().users.get(email.as_str()).cloned()))
+    }
+}
+
+impl OutboxStore for InMemoryLedger {
+    async fn relay_batch<'a>(
+        &'a self,
+        publisher: &'a dyn EventPublisher,
+        limit: u32,
+    ) -> Result<usize, RepoError> {
+        let pending: Vec<OutboxMessage> = self
+            .lock()
+            .outbox
+            .iter()
+            .filter(|(_, sent)| !sent)
+            .take(limit as usize)
+            .map(|(msg, _)| msg.clone())
+            .collect();
+        let mut sent = 0;
+        for message in pending {
+            publisher
+                .publish(&message)
+                .await
+                .map_err(RepoError::Storage)?;
+            if let Some(entry) = self
+                .lock()
+                .outbox
+                .iter_mut()
+                .find(|(m, _)| m.event_id == message.event_id)
+            {
+                entry.1 = true;
+            }
+            sent += 1;
+        }
+        Ok(sent)
     }
 }

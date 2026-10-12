@@ -35,6 +35,7 @@ pub struct Config {
     pub access_token_ttl: Duration,
     pub admin: Option<AdminSeed>,
     pub redis_url: Option<String>,
+    pub nats_url: Option<String>,
     pub api_rate_limit_per_minute: u32,
     pub auth_rate_limit_per_minute: u32,
     pub trust_proxy_headers: bool,
@@ -46,6 +47,7 @@ impl std::fmt::Debug for Config {
             .field("http_addr", &self.http_addr)
             .field("database", &self.database_url.is_some())
             .field("redis", &self.redis_url.is_some())
+            .field("nats", &self.nats_url.is_some())
             .field("access_token_ttl", &self.access_token_ttl)
             .field("admin", &self.admin)
             .field("api_rate_limit_per_minute", &self.api_rate_limit_per_minute)
@@ -106,6 +108,7 @@ impl Config {
             access_token_ttl: Duration::from_secs(number("ACCESS_TOKEN_TTL_SECS", 3600)?),
             admin,
             redis_url: var("REDIS_URL"),
+            nats_url: var("NATS_URL"),
             api_rate_limit_per_minute: number("API_RATE_LIMIT_PER_MINUTE", 120)?,
             auth_rate_limit_per_minute: number("AUTH_RATE_LIMIT_PER_MINUTE", 10)?,
             trust_proxy_headers: matches!(

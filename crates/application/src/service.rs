@@ -2,11 +2,13 @@ use ledger_domain::{
     Account, AccountId, AccountKind, Currency, IdempotencyKey, Money, Transfer, TransferId,
     TransferKind, post_transfer,
 };
+use ledger_events::{Envelope, Event, Party, TransferPosted};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
     Actor, AppError,
-    ports::{EntryQuery, EntryRecord, IdGenerator, LedgerRepository, RepoError},
+    ports::{EntryQuery, EntryRecord, IdGenerator, LedgerRepository, OutboxMessage, RepoError},
 };
 
 pub const DEFAULT_PAGE_SIZE: u32 = 20;
@@ -241,9 +243,10 @@ impl<R: LedgerRepository, G: IdGenerator> LedgerService<R, G> {
                 amount,
             )?;
 
+            let event = self.transfer_posted(&transfer, &from_acc, &to_acc)?;
             match self
                 .repo
-                .commit_transfer(&transfer, &from_acc, &to_acc)
+                .commit_transfer(&transfer, &from_acc, &to_acc, &event)
                 .await
             {
                 Ok(()) => {
@@ -260,6 +263,41 @@ impl<R: LedgerRepository, G: IdGenerator> LedgerService<R, G> {
             }
         }
         Err(AppError::Contention)
+    }
+
+    fn transfer_posted(
+        &self,
+        transfer: &Transfer,
+        from: &Account,
+        to: &Account,
+    ) -> Result<OutboxMessage, AppError> {
+        let party = |a: &Account| Party {
+            account_id: a.id().as_uuid(),
+            holder_id: a.holder().map(|h| h.as_uuid()),
+            owner: a.owner().to_owned(),
+            balance_after_minor: a.balance(),
+        };
+        let envelope = Envelope::new(
+            self.ids.generate(),
+            OffsetDateTime::now_utc(),
+            TransferPosted {
+                transfer_id: transfer.id().as_uuid(),
+                kind: transfer.kind().as_str().to_owned(),
+                amount_minor: transfer.amount().minor(),
+                currency: transfer.amount().currency().to_string(),
+                initiated_by: transfer.initiator().map(|u| u.as_uuid()),
+                from: party(from),
+                to: party(to),
+            },
+        );
+        let payload = envelope
+            .to_json()
+            .map_err(|e| RepoError::Storage(Box::new(e)))?;
+        Ok(OutboxMessage {
+            event_id: envelope.id,
+            subject: TransferPosted::SUBJECT.to_owned(),
+            payload,
+        })
     }
 
     async fn load(&self, id: AccountId) -> Result<Account, AppError> {

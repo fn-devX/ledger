@@ -11,7 +11,9 @@ use ledger_application::{
     ratelimit::{RateDecision, RateLimit, RateLimiter},
 };
 
-use super::{ApiError, jwt::JwtKeys};
+use ledger_auth::JwtKeys;
+
+use super::ApiError;
 
 pub async fn authenticate(
     State(jwt): State<Arc<JwtKeys>>,
@@ -32,10 +34,14 @@ pub async fn authenticate(
                 .into_response();
         };
         match jwt.verify(token) {
-            Ok(actor) => {
-                req.extensions_mut().insert(actor);
+            Ok(subject) => {
+                req.extensions_mut().insert(Actor {
+                    user_id: subject.user_id,
+                    role: subject.role,
+                    name: subject.name,
+                });
             }
-            Err(e) => return e.into_response(),
+            Err(e) => return ApiError::from(e).into_response(),
         }
     }
     next.run(req).await

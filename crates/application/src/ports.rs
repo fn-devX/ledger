@@ -1,4 +1,4 @@
-use std::future::Future;
+use std::{future::Future, pin::Pin};
 
 use ledger_domain::{
     Account, AccountId, Currency, Email, IdempotencyKey, Password, Transfer, TransferId,
@@ -77,6 +77,7 @@ pub trait LedgerRepository: Send + Sync + 'static {
         transfer: &Transfer,
         from: &Account,
         to: &Account,
+        event: &OutboxMessage,
     ) -> impl Future<Output = Result<(), RepoError>> + Send;
 
     fn list_entries(
@@ -85,6 +86,27 @@ pub trait LedgerRepository: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Vec<EntryRecord>, RepoError>> + Send;
 
     fn ping(&self) -> impl Future<Output = Result<(), RepoError>> + Send;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxMessage {
+    pub event_id: Uuid,
+    pub subject: String,
+    pub payload: Vec<u8>,
+}
+
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub trait EventPublisher: Send + Sync + 'static {
+    fn publish<'a>(&'a self, message: &'a OutboxMessage) -> BoxFuture<'a, Result<(), BoxError>>;
+}
+
+pub trait OutboxStore: Send + Sync + 'static {
+    fn relay_batch<'a>(
+        &'a self,
+        publisher: &'a dyn EventPublisher,
+        limit: u32,
+    ) -> impl Future<Output = Result<usize, RepoError>> + Send + 'a;
 }
 
 pub trait UserRepository: Send + Sync + 'static {

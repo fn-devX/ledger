@@ -23,6 +23,16 @@ pub enum ApiError {
     Internal(String),
 }
 
+impl From<ledger_auth::TokenError> for ApiError {
+    fn from(e: ledger_auth::TokenError) -> Self {
+        match e {
+            ledger_auth::TokenError::Expired => Self::Unauthorized("token expired"),
+            ledger_auth::TokenError::Invalid => Self::Unauthorized("invalid token"),
+            ledger_auth::TokenError::Signing(msg) => Self::Internal(msg),
+        }
+    }
+}
+
 impl From<QueryRejection> for ApiError {
     fn from(e: QueryRejection) -> Self {
         Self::BadRequest(e.body_text())

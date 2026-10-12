@@ -1,0 +1,19 @@
+[package]
+name = "ledger-auth"
+description = "JWT access tokens shared by every Ledger service."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ledger-domain.workspace = true
+jsonwebtoken.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

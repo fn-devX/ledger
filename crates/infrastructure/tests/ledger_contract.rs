@@ -1,14 +1,18 @@
 use std::{
     future::{Future, ready},
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use ledger_application::{
     Actor, AppError, AuthService, Deposit, LedgerService, ListEntries, OpenAccount, Register,
     TransferFunds, TransferOutcome,
-    ports::{BoxError, EntryRecord, LedgerRepository, PasswordHasher, UserRepository},
+    ports::{
+        BoxError, BoxFuture, EntryRecord, EventPublisher, LedgerRepository, OutboxMessage,
+        OutboxStore, PasswordHasher, UserRepository,
+    },
 };
 use ledger_domain::{DomainError, Password, Role, TransferKind};
+use ledger_events::{RawEnvelope, TransferPosted};
 use ledger_infrastructure::{InMemoryLedger, PgLedgerRepository, UuidV7Generator};
 use uuid::Uuid;
 
@@ -33,10 +37,34 @@ impl PasswordHasher for PlainHasher {
     }
 }
 
-trait Repo: LedgerRepository + UserRepository + Clone {}
-impl<T: LedgerRepository + UserRepository + Clone> Repo for T {}
+trait Repo: LedgerRepository + UserRepository + OutboxStore + Clone {}
+impl<T: LedgerRepository + UserRepository + OutboxStore + Clone> Repo for T {}
+
+#[derive(Default)]
+struct Collector(Mutex<Vec<OutboxMessage>>);
+
+fn collector() -> &'static Collector {
+    static SHARED: OnceLock<Collector> = OnceLock::new();
+    SHARED.get_or_init(Collector::default)
+}
+
+impl EventPublisher for Collector {
+    fn publish<'a>(&'a self, message: &'a OutboxMessage) -> BoxFuture<'a, Result<(), BoxError>> {
+        self.0.lock().unwrap().push(message.clone());
+        Box::pin(ready(Ok(())))
+    }
+}
+
+struct Broken;
+
+impl EventPublisher for Broken {
+    fn publish<'a>(&'a self, _: &'a OutboxMessage) -> BoxFuture<'a, Result<(), BoxError>> {
+        Box::pin(ready(Err("broker is down".into())))
+    }
+}
 
 struct World<R> {
+    repo: R,
     ledger: Arc<LedgerService<R, UuidV7Generator>>,
     auth: AuthService<R, PlainHasher, UuidV7Generator>,
     admin: Actor,
@@ -61,16 +89,39 @@ impl<R: Repo> World<R> {
     async fn new(repo: R) -> Self {
         let ledger =
             Arc::new(LedgerService::new(repo.clone(), UuidV7Generator).with_max_attempts(200));
-        let auth = AuthService::new(repo, PlainHasher, UuidV7Generator);
+        let auth = AuthService::new(repo.clone(), PlainHasher, UuidV7Generator);
         let admin = auth
             .ensure_admin(&email(), "Cashier", "admin-password")
             .await
             .unwrap();
         Self {
+            repo,
             ledger,
             auth,
             admin: Actor::from(&admin),
         }
+    }
+
+    async fn events_for(&self, currency: &str, expected: usize) -> Vec<TransferPosted> {
+        let mut mine = Vec::new();
+        for _ in 0..50 {
+            while self.repo.relay_batch(collector(), 500).await.unwrap() > 0 {}
+            mine = collector()
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|m| RawEnvelope::parse(&m.payload).unwrap())
+                .filter(RawEnvelope::is::<TransferPosted>)
+                .map(|raw| raw.decode::<TransferPosted>().unwrap().data)
+                .filter(|event| event.currency == currency)
+                .collect();
+            if mine.len() >= expected {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        mine
     }
 
     async fn customer(&self, name: &str) -> Actor {
@@ -517,6 +568,107 @@ async fn entries_validation<R: Repo>(w: World<R>) {
     assert!(matches!(r, Err(AppError::AccountNotFound(_))));
 }
 
+async fn outbox_records_exactly_the_committed_transfers<R: Repo>(w: World<R>) {
+    let cur = currency();
+    let (firuz, nigina) = (w.customer("Firuz").await, w.customer("Nigina").await);
+    let (a, b) = (w.open(&firuz, &cur).await, w.open(&nigina, &cur).await);
+    w.deposit(a, 1_000, &cur).await;
+    let k = key();
+    let posted = w
+        .transfer(&firuz, a, b, 300, &cur, k.clone())
+        .await
+        .unwrap();
+    assert!(
+        w.transfer(&firuz, a, b, 300, &cur, k)
+            .await
+            .unwrap()
+            .replayed
+    );
+    assert!(
+        w.transfer(&firuz, a, b, 999_999, &cur, key())
+            .await
+            .is_err()
+    );
+
+    let events = w.events_for(&cur, 2).await;
+    assert_eq!(
+        events.len(),
+        2,
+        "one deposit and one transfer, no replay, no failure"
+    );
+    let transfer = events
+        .iter()
+        .find(|e| e.transfer_id == posted.transfer.id().as_uuid())
+        .expect("transfer event");
+    assert_eq!(transfer.kind, "transfer");
+    assert_eq!(transfer.amount_minor, 300);
+    assert_eq!(transfer.initiated_by, Some(firuz.user_id.as_uuid()));
+    assert_eq!(
+        (
+            transfer.from.owner.as_str(),
+            transfer.from.balance_after_minor
+        ),
+        ("Firuz", 700)
+    );
+    assert_eq!(
+        (transfer.to.owner.as_str(), transfer.to.balance_after_minor),
+        ("Nigina", 300)
+    );
+    assert_eq!(transfer.to.holder_id, Some(nigina.user_id.as_uuid()));
+
+    assert_eq!(
+        w.events_for(&cur, 0).await,
+        events,
+        "published events are not sent again"
+    );
+}
+
+async fn outbox_survives_a_broker_outage<R: Repo>(w: World<R>) {
+    let cur = currency();
+    let firuz = w.customer("Firuz").await;
+    let a = w.open(&firuz, &cur).await;
+    w.deposit(a, 1_000, &cur).await;
+
+    assert!(w.repo.relay_batch(&Broken, 100).await.is_err());
+    assert_eq!(
+        w.events_for(&cur, 1).await.len(),
+        1,
+        "the event waited for the broker"
+    );
+}
+
+async fn outbox_matches_concurrent_commits<R: Repo>(w: World<R>) {
+    let cur = currency();
+    let (firuz, nigina) = (w.customer("Firuz").await, w.customer("Nigina").await);
+    let (a, b) = (w.open(&firuz, &cur).await, w.open(&nigina, &cur).await);
+    w.deposit(a, 1_000, &cur).await;
+    let w = Arc::new(w);
+    let tasks: Vec<_> = (0..30)
+        .map(|_| {
+            let (w, firuz, cur) = (w.clone(), firuz.clone(), cur.clone());
+            tokio::spawn(async move { w.transfer(&firuz, a, b, 100, &cur, key()).await.is_ok() })
+        })
+        .collect();
+    let mut ok = 0;
+    for t in tasks {
+        ok += usize::from(t.await.unwrap());
+    }
+    assert_eq!(ok, 10);
+    let events = w.events_for(&cur, 11).await;
+    assert_eq!(
+        events.len(),
+        11,
+        "retried and rejected attempts leave no events"
+    );
+    let mut last_balances: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == "transfer")
+        .map(|e| e.from.balance_after_minor)
+        .collect();
+    last_balances.sort_unstable();
+    assert_eq!(last_balances, (0..10).map(|i| i * 100).collect::<Vec<_>>());
+}
+
 macro_rules! contract {
     ($($name:ident),* $(,)?) => {
         mod memory {
@@ -556,6 +708,9 @@ contract!(
     concurrent_transfers_never_overdraw,
     entries_are_paginated_newest_first,
     entries_validation,
+    outbox_records_exactly_the_committed_transfers,
+    outbox_survives_a_broker_outage,
+    outbox_matches_concurrent_commits,
 );
 
 #[tokio::test]

@@ -8,6 +8,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-nats.workspace = true
+ledger-events = { workspace = true, features = ["jetstream"] }
+serde_json.workspace = true
 argon2.workspace = true
 redis.workspace = true
 tokio.workspace = true
@@ -19,6 +22,7 @@ uuid.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+futures.workspace = true
 
 [lints]
 workspace = true

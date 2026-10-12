@@ -1,13 +1,22 @@
+use std::{sync::Arc, time::Duration};
+
 use ledger_application::ports::{
-    EntryQuery, EntryRecord, LedgerRepository, RepoError, UserRepository,
+    EntryQuery, EntryRecord, EventPublisher, LedgerRepository, OutboxMessage, OutboxStore,
+    RepoError, UserRepository,
 };
 use ledger_domain::{
     Account, AccountId, AccountKind, Currency, Email, IdempotencyKey, Money, Role, Transfer,
     TransferId, TransferKind, User, UserId,
 };
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{
+    PgPool,
+    postgres::{PgListener, PgPoolOptions},
+};
 use time::OffsetDateTime;
+use tokio::{sync::Notify, task::JoinHandle};
 use uuid::Uuid;
+
+const OUTBOX_CHANNEL: &str = "ledger_outbox";
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
@@ -40,6 +49,28 @@ impl PgLedgerRepository {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    pub fn spawn_outbox_listener(&self, signal: Arc<Notify>) -> JoinHandle<()> {
+        let pool = self.pool.clone();
+        tokio::spawn(async move {
+            loop {
+                match PgListener::connect_with(&pool).await {
+                    Ok(mut listener) => match listener.listen(OUTBOX_CHANNEL).await {
+                        Ok(()) => {
+                            signal.notify_one();
+                            while listener.recv().await.is_ok() {
+                                signal.notify_one();
+                            }
+                            tracing::warn!("outbox listener disconnected");
+                        }
+                        Err(e) => tracing::warn!(error = %e, "cannot LISTEN on outbox channel"),
+                    },
+                    Err(e) => tracing::warn!(error = %e, "cannot connect outbox listener"),
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        })
     }
 }
 
@@ -253,6 +284,7 @@ impl LedgerRepository for PgLedgerRepository {
         t: &Transfer,
         from: &Account,
         to: &Account,
+        event: &OutboxMessage,
     ) -> Result<(), RepoError> {
         let mut tx = self.pool.begin().await.map_err(storage)?;
 
@@ -318,6 +350,21 @@ impl LedgerRepository for PgLedgerRepository {
             .await
             .map_err(storage)?;
         }
+
+        let payload: serde_json::Value = serde_json::from_slice(&event.payload).map_err(storage)?;
+        sqlx::query!(
+            "INSERT INTO outbox (event_id, subject, payload) VALUES ($1, $2, $3)",
+            event.event_id,
+            event.subject,
+            payload,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        sqlx::query("SELECT pg_notify('ledger_outbox', '')")
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
 
         tx.commit().await.map_err(storage)
     }
@@ -408,5 +455,58 @@ impl UserRepository for PgLedgerRepository {
         .map_err(storage)?
         .map(User::try_from)
         .transpose()
+    }
+}
+
+impl OutboxStore for PgLedgerRepository {
+    async fn relay_batch<'a>(
+        &'a self,
+        publisher: &'a dyn EventPublisher,
+        limit: u32,
+    ) -> Result<usize, RepoError> {
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let rows = sqlx::query!(
+            "SELECT id, event_id, subject, payload FROM outbox
+             WHERE published_at IS NULL
+             ORDER BY id
+             LIMIT $1
+             FOR UPDATE SKIP LOCKED",
+            i64::from(limit),
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(storage)?;
+
+        let mut sent = Vec::with_capacity(rows.len());
+        let mut failure = None;
+        for row in rows {
+            let message = OutboxMessage {
+                event_id: row.event_id,
+                subject: row.subject,
+                payload: serde_json::to_vec(&row.payload).map_err(storage)?,
+            };
+            match publisher.publish(&message).await {
+                Ok(()) => sent.push(row.id),
+                Err(e) => {
+                    failure = Some(e);
+                    break;
+                }
+            }
+        }
+
+        if !sent.is_empty() {
+            sqlx::query!(
+                "UPDATE outbox SET published_at = now() WHERE id = ANY($1)",
+                &sent,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        }
+        tx.commit().await.map_err(storage)?;
+        match failure {
+            Some(e) => Err(RepoError::Storage(e)),
+            None => Ok(sent.len()),
+        }
     }
 }
