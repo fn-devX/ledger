@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    future::{Future, ready},
+    sync::Arc,
+};
 
 use ledger_application::{
     Actor, AppError, AuthService, Deposit, LedgerService, ListEntries, OpenAccount, Register,
@@ -13,12 +16,16 @@ use uuid::Uuid;
 struct PlainHasher;
 
 impl PasswordHasher for PlainHasher {
-    async fn hash(&self, password: &Password) -> Result<String, BoxError> {
-        Ok(format!("plain:{}", password.expose()))
+    fn hash(&self, password: &Password) -> impl Future<Output = Result<String, BoxError>> + Send {
+        ready(Ok(format!("plain:{}", password.expose())))
     }
 
-    async fn verify(&self, password: &str, hash: &str) -> Result<bool, BoxError> {
-        Ok(hash == format!("plain:{password}"))
+    fn verify(
+        &self,
+        password: &str,
+        hash: &str,
+    ) -> impl Future<Output = Result<bool, BoxError>> + Send {
+        ready(Ok(hash == format!("plain:{password}")))
     }
 
     fn decoy_hash(&self) -> &'static str {
@@ -307,7 +314,7 @@ async fn authorization<R: Repo>(w: World<R>) {
         .map(|acc| acc.id().as_uuid())
         .collect();
     assert_eq!(mine, [a], "list shows only the caller's accounts");
-    assert!(w.ledger.list_accounts(&stranger).await.unwrap().is_empty());
+    assert_eq!(w.ledger.list_accounts(&stranger).await.unwrap(), []);
     assert_eq!(w.all_entries(&w.admin, b, 10).await.len(), 1);
 
     let entries = w.all_entries(&firuz, a, 10).await;
@@ -489,7 +496,8 @@ async fn entries_validation<R: Repo>(w: World<R>) {
         limit,
     };
     let empty = w.ledger.list_entries(&firuz, q(None)).await.unwrap();
-    assert!(empty.entries.is_empty() && empty.next_before.is_none());
+    assert_eq!(empty.entries, []);
+    assert_eq!(empty.next_before, None);
 
     for limit in [0, 101] {
         let r = w.ledger.list_entries(&firuz, q(Some(limit))).await;

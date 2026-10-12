@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    future::{Future, ready},
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     Router,
@@ -27,12 +31,16 @@ pub const ADMIN_PASSWORD: &str = "admin-password";
 pub struct PlainHasher;
 
 impl PasswordHasher for PlainHasher {
-    async fn hash(&self, password: &Password) -> Result<String, BoxError> {
-        Ok(format!("plain:{}", password.expose()))
+    fn hash(&self, password: &Password) -> impl Future<Output = Result<String, BoxError>> + Send {
+        ready(Ok(format!("plain:{}", password.expose())))
     }
 
-    async fn verify(&self, password: &str, hash: &str) -> Result<bool, BoxError> {
-        Ok(hash == format!("plain:{password}"))
+    fn verify(
+        &self,
+        password: &str,
+        hash: &str,
+    ) -> impl Future<Output = Result<bool, BoxError>> + Send {
+        ready(Ok(hash == format!("plain:{password}")))
     }
 
     fn decoy_hash(&self) -> &'static str {
