@@ -1,5 +1,5 @@
-use ledger_application::{EntryPage, ports::EntryRecord};
-use ledger_domain::{Account, Transfer};
+use ledger_application::{Actor, EntryPage, ports::EntryRecord};
+use ledger_domain::{Account, Transfer, User};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use utoipa::{IntoParams, ToSchema};
@@ -8,8 +8,6 @@ use uuid::Uuid;
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OpenAccountRequest {
-    #[schema(example = "Firuz Rahimov", min_length = 1, max_length = 200)]
-    pub owner: String,
     #[schema(example = "TJS", pattern = "^[A-Z]{3}$")]
     pub currency: String,
 }
@@ -143,6 +141,76 @@ impl EntryPageResponse {
                 .map(|e| EntryResponse::new(e, &currency))
                 .collect(),
             next_cursor,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterRequest {
+    #[schema(example = "firuz@example.tj")]
+    pub email: String,
+    #[schema(example = "Firuz Rahimov", min_length = 1, max_length = 200)]
+    pub name: String,
+    #[schema(example = "correct horse battery", min_length = 8, max_length = 128, format = Password)]
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoginRequest {
+    #[schema(example = "firuz@example.tj")]
+    pub email: String,
+    #[schema(example = "correct horse battery", format = Password)]
+    pub password: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct TokenResponse {
+    pub access_token: String,
+    #[schema(example = "Bearer")]
+    pub token_type: String,
+    #[schema(example = 3600)]
+    pub expires_in: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UserResponse {
+    pub id: Uuid,
+    #[schema(example = "firuz@example.tj")]
+    pub email: String,
+    #[schema(example = "Firuz Rahimov")]
+    pub name: String,
+    #[schema(example = "customer")]
+    pub role: String,
+}
+
+impl From<&User> for UserResponse {
+    fn from(u: &User) -> Self {
+        Self {
+            id: u.id().as_uuid(),
+            email: u.email().as_str().to_owned(),
+            name: u.name().to_owned(),
+            role: u.role().as_str().to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct MeResponse {
+    pub id: Uuid,
+    #[schema(example = "Firuz Rahimov")]
+    pub name: String,
+    #[schema(example = "customer")]
+    pub role: String,
+}
+
+impl From<&Actor> for MeResponse {
+    fn from(a: &Actor) -> Self {
+        Self {
+            id: a.user_id.as_uuid(),
+            name: a.name.clone(),
+            role: a.role.as_str().to_owned(),
         }
     }
 }

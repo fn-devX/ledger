@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, kind, owner, currency, balance, version FROM accounts WHERE id = $1",
+  "query": "SELECT id, email, name, role, password_hash FROM users WHERE email = $1",
   "describe": {
     "columns": [
       {
@@ -10,33 +10,28 @@
       },
       {
         "ordinal": 1,
-        "name": "kind",
+        "name": "email",
         "type_info": "Text"
       },
       {
         "ordinal": 2,
-        "name": "owner",
+        "name": "name",
         "type_info": "Text"
       },
       {
         "ordinal": 3,
-        "name": "currency",
+        "name": "role",
         "type_info": "Text"
       },
       {
         "ordinal": 4,
-        "name": "balance",
-        "type_info": "Int8"
-      },
-      {
-        "ordinal": 5,
-        "name": "version",
-        "type_info": "Int8"
+        "name": "password_hash",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Text"
       ]
     },
     "nullable": [
@@ -44,9 +39,8 @@
       false,
       false,
       false,
-      false,
       false
     ]
   },
-  "hash": "d8a1661fe2cbb75cc2f1d0023947c75eafaea10c1a88bfd11f0383eb83071b4f"
+  "hash": "dfb1a7de2d6da3fc55c33d38088400e9e3c961534fd189aa43bc5ec046ac147e"
 }

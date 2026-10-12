@@ -4,8 +4,12 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use ledger_application::ports::{EntryQuery, EntryRecord, LedgerRepository, RepoError};
-use ledger_domain::{Account, AccountId, Currency, Entry, IdempotencyKey, Transfer, TransferId};
+use ledger_application::ports::{
+    EntryQuery, EntryRecord, LedgerRepository, RepoError, UserRepository,
+};
+use ledger_domain::{
+    Account, AccountId, Currency, Email, Entry, IdempotencyKey, Transfer, TransferId, User, UserId,
+};
 use time::OffsetDateTime;
 
 #[derive(Debug, Clone, Default)]
@@ -18,7 +22,8 @@ struct State {
     accounts: HashMap<AccountId, Account>,
     system: HashMap<Currency, AccountId>,
     transfers: HashMap<TransferId, Transfer>,
-    keys: HashMap<String, TransferId>,
+    keys: HashMap<(Option<UserId>, String), TransferId>,
+    users: HashMap<String, User>,
     entries: Vec<(AccountId, EntryRecord)>,
 }
 
@@ -53,6 +58,7 @@ fn persisted(a: &Account) -> Account {
     Account::restore(
         a.id(),
         a.kind(),
+        a.holder(),
         a.owner().to_owned(),
         a.currency(),
         a.balance(),
@@ -69,9 +75,9 @@ impl State {
             .clone()
     }
 
-    fn find_transfer_by_key(&self, key: &IdempotencyKey) -> Option<Transfer> {
+    fn find_transfer_by_key(&self, initiator: UserId, key: &IdempotencyKey) -> Option<Transfer> {
         self.keys
-            .get(key.as_str())
+            .get(&(Some(initiator), key.as_str().to_owned()))
             .and_then(|id| self.transfers.get(id))
             .cloned()
     }
@@ -88,15 +94,16 @@ impl State {
                 return Err(RepoError::Conflict);
             }
         }
-        if self.keys.contains_key(transfer.idempotency_key().as_str()) {
+        let scoped_key = (
+            transfer.initiator(),
+            transfer.idempotency_key().as_str().to_owned(),
+        );
+        if self.keys.contains_key(&scoped_key) {
             return Err(RepoError::DuplicateIdempotencyKey);
         }
         self.accounts.insert(from.id(), persisted(from));
         self.accounts.insert(to.id(), persisted(to));
-        self.keys.insert(
-            transfer.idempotency_key().as_str().to_owned(),
-            transfer.id(),
-        );
+        self.keys.insert(scoped_key, transfer.id());
         self.transfers.insert(transfer.id(), transfer.clone());
         let created_at = OffsetDateTime::now_utc();
         for entry in transfer.entries() {
@@ -153,6 +160,21 @@ impl LedgerRepository for InMemoryLedger {
         ready(Ok(self.lock().accounts.get(&id).cloned()))
     }
 
+    fn list_accounts(
+        &self,
+        holder: UserId,
+    ) -> impl Future<Output = Result<Vec<Account>, RepoError>> + Send {
+        let mut accounts: Vec<Account> = self
+            .lock()
+            .accounts
+            .values()
+            .filter(|a| a.is_held_by(holder))
+            .cloned()
+            .collect();
+        accounts.sort_by_key(Account::id);
+        ready(Ok(accounts))
+    }
+
     fn system_account(
         &self,
         currency: Currency,
@@ -170,9 +192,10 @@ impl LedgerRepository for InMemoryLedger {
 
     fn find_transfer_by_key(
         &self,
+        initiator: UserId,
         key: &IdempotencyKey,
     ) -> impl Future<Output = Result<Option<Transfer>, RepoError>> + Send {
-        ready(Ok(self.lock().find_transfer_by_key(key)))
+        ready(Ok(self.lock().find_transfer_by_key(initiator, key)))
     }
 
     fn commit_transfer(
@@ -193,5 +216,27 @@ impl LedgerRepository for InMemoryLedger {
 
     fn ping(&self) -> impl Future<Output = Result<(), RepoError>> + Send {
         ready(Ok(()))
+    }
+}
+
+impl UserRepository for InMemoryLedger {
+    fn insert_user(&self, user: &User) -> impl Future<Output = Result<(), RepoError>> + Send {
+        let mut state = self.lock();
+        let result = if state.users.contains_key(user.email().as_str()) {
+            Err(RepoError::DuplicateEmail)
+        } else {
+            state
+                .users
+                .insert(user.email().as_str().to_owned(), user.clone());
+            Ok(())
+        };
+        ready(result)
+    }
+
+    fn find_user_by_email(
+        &self,
+        email: &Email,
+    ) -> impl Future<Output = Result<Option<User>, RepoError>> + Send {
+        ready(Ok(self.lock().users.get(email.as_str()).cloned()))
     }
 }

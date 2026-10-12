@@ -11,6 +11,12 @@ pub enum AppError {
     AccountNotFound(Uuid),
     #[error("transfer {0} not found")]
     TransferNotFound(Uuid),
+    #[error("invalid email or password")]
+    InvalidCredentials,
+    #[error("{0}")]
+    Forbidden(&'static str),
+    #[error("a user with this email already exists")]
+    EmailTaken,
     #[error("idempotency key was already used with different parameters")]
     IdempotencyKeyReused,
     #[error("page size must be between 1 and {max}")]

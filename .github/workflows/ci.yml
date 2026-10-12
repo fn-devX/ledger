@@ -22,8 +22,14 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U ledger" --health-interval 2s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-retries 20
     env:
       DATABASE_URL: postgres://ledger:ledger@localhost:5432/ledger
+      REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -41,7 +47,7 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy (pedantic)
         run: cargo clippy --workspace --all-targets
-      - name: Tests (in-memory + PostgreSQL)
+      - name: Tests (in-memory + PostgreSQL + Redis)
         run: cargo test --workspace
 
   docker:

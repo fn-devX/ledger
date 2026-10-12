@@ -5,6 +5,8 @@ use axum::{
     http::request::Parts,
 };
 
+use ledger_application::Actor;
+
 use super::ApiError;
 
 #[derive(Debug, FromRequest)]
@@ -36,6 +38,27 @@ impl<S: Send + Sync> FromRequestParts<S> for IdempotencyKey {
                 .and_then(|v| v.to_str().ok())
                 .map(|v| Self(v.to_owned()))
                 .ok_or_else(|| ApiError::BadRequest("missing Idempotency-Key header".into())),
+        )
+    }
+}
+
+#[derive(Debug)]
+pub struct CurrentActor(pub Actor);
+
+impl<S: Send + Sync> FromRequestParts<S> for CurrentActor {
+    type Rejection = ApiError;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        _: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        ready(
+            parts
+                .extensions
+                .get::<Actor>()
+                .cloned()
+                .map(Self)
+                .ok_or(ApiError::Unauthorized("missing bearer token")),
         )
     }
 }

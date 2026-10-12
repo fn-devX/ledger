@@ -2,7 +2,7 @@ use std::fmt;
 
 use uuid::Uuid;
 
-use crate::{Currency, DomainError, Money};
+use crate::{Currency, DomainError, Money, UserId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AccountId(Uuid);
@@ -42,6 +42,7 @@ impl AccountKind {
 pub struct Account {
     id: AccountId,
     kind: AccountKind,
+    holder: Option<UserId>,
     owner: String,
     currency: Currency,
     balance: i64,
@@ -50,7 +51,12 @@ pub struct Account {
 }
 
 impl Account {
-    pub fn open(id: AccountId, owner: &str, currency: Currency) -> Result<Self, DomainError> {
+    pub fn open(
+        id: AccountId,
+        holder: UserId,
+        owner: &str,
+        currency: Currency,
+    ) -> Result<Self, DomainError> {
         let owner = owner.trim();
         if owner.is_empty() || owner.chars().count() > 200 {
             return Err(DomainError::InvalidOwner);
@@ -58,6 +64,7 @@ impl Account {
         Ok(Self::restore(
             id,
             AccountKind::Customer,
+            Some(holder),
             owner.to_owned(),
             currency,
             0,
@@ -69,6 +76,7 @@ impl Account {
         Self::restore(
             id,
             AccountKind::System,
+            None,
             format!("system:{currency}"),
             currency,
             0,
@@ -79,6 +87,7 @@ impl Account {
     pub fn restore(
         id: AccountId,
         kind: AccountKind,
+        holder: Option<UserId>,
         owner: String,
         currency: Currency,
         balance: i64,
@@ -87,6 +96,7 @@ impl Account {
         Self {
             id,
             kind,
+            holder,
             owner,
             currency,
             balance,
@@ -97,6 +107,12 @@ impl Account {
 
     pub fn id(&self) -> AccountId {
         self.id
+    }
+    pub fn holder(&self) -> Option<UserId> {
+        self.holder
+    }
+    pub fn is_held_by(&self, user: UserId) -> bool {
+        self.holder == Some(user)
     }
     pub fn kind(&self) -> AccountKind {
         self.kind
@@ -168,11 +184,13 @@ mod tests {
     fn open_validates_owner() {
         let id = AccountId::from_uuid(Uuid::nil());
         assert_eq!(
-            Account::open(id, "   ", tjs()),
+            Account::open(id, UserId::from_uuid(Uuid::nil()), "   ", tjs()),
             Err(DomainError::InvalidOwner)
         );
-        let acc = Account::open(id, "  Rustam ", tjs()).unwrap();
+        let acc = Account::open(id, UserId::from_uuid(Uuid::nil()), "  Rustam ", tjs()).unwrap();
         assert_eq!(acc.owner(), "Rustam");
+        assert!(acc.is_held_by(UserId::from_uuid(Uuid::nil())));
+        assert!(!acc.is_held_by(UserId::from_uuid(Uuid::max())));
         assert_eq!(acc.balance(), 0);
     }
 
@@ -180,7 +198,7 @@ mod tests {
     fn customer_cannot_go_negative_but_system_can() {
         let id = AccountId::from_uuid(Uuid::nil());
         let amount = Money::new(100, tjs()).unwrap();
-        let customer = Account::open(id, "a", tjs()).unwrap();
+        let customer = Account::open(id, UserId::from_uuid(Uuid::nil()), "a", tjs()).unwrap();
         assert!(matches!(
             customer.balance_after_debit(amount),
             Err(DomainError::InsufficientFunds {

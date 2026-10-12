@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, idempotency_key, kind, from_account, to_account, amount, currency\n             FROM transfers WHERE idempotency_key = $1",
+  "query": "SELECT id, initiated_by, idempotency_key, kind, from_account, to_account, amount, currency\n             FROM transfers WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -10,42 +10,48 @@
       },
       {
         "ordinal": 1,
+        "name": "initiated_by",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
         "name": "idempotency_key",
         "type_info": "Text"
       },
       {
-        "ordinal": 2,
+        "ordinal": 3,
         "name": "kind",
         "type_info": "Text"
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "from_account",
         "type_info": "Uuid"
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "to_account",
         "type_info": "Uuid"
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "amount",
         "type_info": "Int8"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "currency",
         "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
       false,
+      true,
       false,
       false,
       false,
@@ -54,5 +60,5 @@
       false
     ]
   },
-  "hash": "d57324e8c622ab4df43ef12226c65aaafcd0bbd584784b032a1de8c7371da818"
+  "hash": "84359929792c405be31a7470bf2d8167ffe6ac242e24003361ea2da063b7775d"
 }

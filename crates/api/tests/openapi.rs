@@ -1,19 +1,19 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+mod common;
+
+use std::path::PathBuf;
 
 use axum::{
     body::Body,
     http::{Method, Request, StatusCode},
 };
+use common::TestApp;
 use http_body_util::BodyExt;
-use ledger_api::http::{ApiDoc, router};
-use ledger_application::LedgerService;
-use ledger_infrastructure::{InMemoryLedger, UuidV7Generator};
+use ledger_api::http::ApiDoc;
 use tower::ServiceExt;
 use utoipa::OpenApi;
 
-fn app() -> axum::Router {
-    let svc = LedgerService::new(InMemoryLedger::new(), UuidV7Generator);
-    router(Arc::new(svc), Duration::from_secs(5))
+async fn app() -> axum::Router {
+    TestApp::new().await.router
 }
 
 fn snapshot_path() -> PathBuf {
@@ -40,7 +40,7 @@ fn openapi_snapshot_is_up_to_date() {
 
 #[tokio::test]
 async fn every_documented_operation_is_routed() {
-    let app = app();
+    let app = app().await;
     let spec = ApiDoc::openapi();
     let placeholder = uuid::Uuid::now_v7().to_string();
     let mut checked = 0;
@@ -80,12 +80,12 @@ async fn every_documented_operation_is_routed() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 8, "unexpected number of documented operations");
+    assert_eq!(checked, 12, "unexpected number of documented operations");
 }
 
 #[tokio::test]
 async fn serves_spec_and_swagger_ui() {
-    let app = app();
+    let app = app().await;
 
     let resp = app
         .clone()

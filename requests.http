@@ -1,40 +1,57 @@
 @host = http://localhost:8080
 
-### Open account
-POST {{host}}/v1/accounts
+### Log in as the admin (credentials from .env)
+POST {{host}}/v1/auth/login
 Content-Type: application/json
 
-{ "owner": "Firuz", "currency": "TJS" }
+{ "email": "admin@ledger.local", "password": "ledger-admin-2026" }
+
+> {% client.global.set("admin", response.body.access_token); %}
+
+### Register a customer
+POST {{host}}/v1/auth/register
+Content-Type: application/json
+
+{ "email": "firuz-{{$random.uuid}}@example.tj", "name": "Firuz", "password": "password123" }
+
+> {% client.global.set("email", response.body.email); %}
+
+### Log in as the customer
+POST {{host}}/v1/auth/login
+Content-Type: application/json
+
+{ "email": "{{email}}", "password": "password123" }
+
+> {% client.global.set("token", response.body.access_token); %}
+
+### Who am I
+GET {{host}}/v1/auth/me
+Authorization: Bearer {{token}}
+
+### Open an account
+POST {{host}}/v1/accounts
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "currency": "TJS" }
 
 > {% client.global.set("a", response.body.id); %}
 
-### Open second account
-POST {{host}}/v1/accounts
-Content-Type: application/json
+### My accounts
+GET {{host}}/v1/accounts
+Authorization: Bearer {{token}}
 
-{ "owner": "Nigina", "currency": "TJS" }
-
-> {% client.global.set("b", response.body.id); %}
-
-### Deposit 1000.00 TJS to the first account
+### Deposit 1000.00 TJS (admin only)
 POST {{host}}/v1/accounts/{{a}}/deposits
+Authorization: Bearer {{admin}}
 Content-Type: application/json
 Idempotency-Key: {{$random.uuid}}
 
 { "amount_minor": 100000, "currency": "TJS" }
 
-### Transfer 250.00 TJS (repeat it to get 200 and the same transfer)
-POST {{host}}/v1/transfers
-Content-Type: application/json
-Idempotency-Key: demo-transfer-1
-
-{ "from": "{{a}}", "to": "{{b}}", "amount_minor": 25000, "currency": "TJS" }
-
-### Get balance
-GET {{host}}/v1/accounts/{{a}}
-
 ### Account statement (newest first, paginated; pass next_cursor as ?cursor=)
 GET {{host}}/v1/accounts/{{a}}/entries?limit=20
+Authorization: Bearer {{token}}
 
 ### Health
 GET {{host}}/health/ready

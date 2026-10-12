@@ -1,11 +1,11 @@
 use ledger_domain::{
-    Account, AccountId, Currency, IdempotencyKey, Money, Transfer, TransferId, TransferKind,
-    post_transfer,
+    Account, AccountId, AccountKind, Currency, IdempotencyKey, Money, Transfer, TransferId,
+    TransferKind, post_transfer,
 };
 use uuid::Uuid;
 
 use crate::{
-    AppError,
+    Actor, AppError,
     ports::{EntryQuery, EntryRecord, IdGenerator, LedgerRepository, RepoError},
 };
 
@@ -14,7 +14,6 @@ pub const MAX_PAGE_SIZE: u32 = 100;
 
 #[derive(Debug, Clone)]
 pub struct OpenAccount {
-    pub owner: String,
     pub currency: String,
 }
 
@@ -87,12 +86,13 @@ impl<R: LedgerRepository, G: IdGenerator> LedgerService<R, G> {
         &self.repo
     }
 
-    #[tracing::instrument(skip(self), err(level = "warn"))]
-    pub async fn open_account(&self, cmd: OpenAccount) -> Result<Account, AppError> {
+    #[tracing::instrument(skip(self), fields(user = %actor.user_id), err(level = "warn"))]
+    pub async fn open_account(&self, actor: &Actor, cmd: OpenAccount) -> Result<Account, AppError> {
         let currency = Currency::parse(&cmd.currency)?;
         let account = Account::open(
             AccountId::from_uuid(self.ids.generate()),
-            &cmd.owner,
+            actor.user_id,
+            &actor.name,
             currency,
         )?;
         self.repo.insert_account(&account).await?;
@@ -100,26 +100,48 @@ impl<R: LedgerRepository, G: IdGenerator> LedgerService<R, G> {
         Ok(account)
     }
 
-    pub async fn get_account(&self, id: Uuid) -> Result<Account, AppError> {
-        self.repo
-            .find_account(AccountId::from_uuid(id))
-            .await?
-            .ok_or(AppError::AccountNotFound(id))
+    pub async fn list_accounts(&self, actor: &Actor) -> Result<Vec<Account>, AppError> {
+        Ok(self.repo.list_accounts(actor.user_id).await?)
     }
 
-    pub async fn get_transfer(&self, id: Uuid) -> Result<Transfer, AppError> {
-        self.repo
+    pub async fn get_account(&self, actor: &Actor, id: Uuid) -> Result<Account, AppError> {
+        let account = self.load(AccountId::from_uuid(id)).await?;
+        if actor.can_view(&account) {
+            Ok(account)
+        } else {
+            Err(AppError::AccountNotFound(id))
+        }
+    }
+
+    pub async fn get_transfer(&self, actor: &Actor, id: Uuid) -> Result<Transfer, AppError> {
+        let transfer = self
+            .repo
             .find_transfer(TransferId::from_uuid(id))
             .await?
-            .ok_or(AppError::TransferNotFound(id))
+            .ok_or(AppError::TransferNotFound(id))?;
+        if actor.is_admin() {
+            return Ok(transfer);
+        }
+        for side in [transfer.from(), transfer.to()] {
+            if let Some(account) = self.repo.find_account(side).await?
+                && account.is_held_by(actor.user_id)
+            {
+                return Ok(transfer);
+            }
+        }
+        Err(AppError::TransferNotFound(id))
     }
 
-    pub async fn list_entries(&self, query: ListEntries) -> Result<EntryPage, AppError> {
+    pub async fn list_entries(
+        &self,
+        actor: &Actor,
+        query: ListEntries,
+    ) -> Result<EntryPage, AppError> {
         let limit = query.limit.unwrap_or(DEFAULT_PAGE_SIZE);
         if !(1..=MAX_PAGE_SIZE).contains(&limit) {
             return Err(AppError::InvalidPageSize { max: MAX_PAGE_SIZE });
         }
-        let account = self.get_account(query.account).await?;
+        let account = self.get_account(actor, query.account).await?;
         let mut entries = self
             .repo
             .list_entries(EntryQuery {
@@ -142,11 +164,15 @@ impl<R: LedgerRepository, G: IdGenerator> LedgerService<R, G> {
         })
     }
 
-    #[tracing::instrument(skip(self), err(level = "warn"))]
-    pub async fn deposit(&self, cmd: Deposit) -> Result<TransferOutcome, AppError> {
+    #[tracing::instrument(skip(self), fields(user = %actor.user_id), err(level = "warn"))]
+    pub async fn deposit(&self, actor: &Actor, cmd: Deposit) -> Result<TransferOutcome, AppError> {
+        if !actor.is_admin() {
+            return Err(AppError::Forbidden("only admins can deposit money"));
+        }
         let key = IdempotencyKey::parse(&cmd.idempotency_key)?;
         let amount = Money::new(cmd.amount_minor, Currency::parse(&cmd.currency)?)?;
         self.post(
+            actor,
             key,
             TransferKind::Deposit,
             Source::Treasury,
@@ -156,15 +182,23 @@ impl<R: LedgerRepository, G: IdGenerator> LedgerService<R, G> {
         .await
     }
 
-    #[tracing::instrument(skip(self), err(level = "warn"))]
-    pub async fn transfer(&self, cmd: TransferFunds) -> Result<TransferOutcome, AppError> {
+    #[tracing::instrument(skip(self), fields(user = %actor.user_id), err(level = "warn"))]
+    pub async fn transfer(
+        &self,
+        actor: &Actor,
+        cmd: TransferFunds,
+    ) -> Result<TransferOutcome, AppError> {
         let key = IdempotencyKey::parse(&cmd.idempotency_key)?;
         let amount = Money::new(cmd.amount_minor, Currency::parse(&cmd.currency)?)?;
-        let from = Source::Account(AccountId::from_uuid(cmd.from));
+        let from = AccountId::from_uuid(cmd.from);
+        if !self.load(from).await?.is_held_by(actor.user_id) {
+            return Err(AppError::AccountNotFound(cmd.from));
+        }
         self.post(
+            actor,
             key,
             TransferKind::Transfer,
-            from,
+            Source::Account(from),
             AccountId::from_uuid(cmd.to),
             amount,
         )
@@ -173,6 +207,7 @@ impl<R: LedgerRepository, G: IdGenerator> LedgerService<R, G> {
 
     async fn post(
         &self,
+        actor: &Actor,
         key: IdempotencyKey,
         kind: TransferKind,
         source: Source,
@@ -180,7 +215,7 @@ impl<R: LedgerRepository, G: IdGenerator> LedgerService<R, G> {
         amount: Money,
     ) -> Result<TransferOutcome, AppError> {
         for attempt in 1..=self.max_attempts {
-            if let Some(existing) = self.repo.find_transfer_by_key(&key).await? {
+            if let Some(existing) = self.repo.find_transfer_by_key(actor.user_id, &key).await? {
                 return Self::replay(existing, kind, source, to, amount);
             }
 
@@ -192,14 +227,13 @@ impl<R: LedgerRepository, G: IdGenerator> LedgerService<R, G> {
                 }
             };
             let mut to_acc = self.load(to).await?;
-            if kind == TransferKind::Deposit
-                && to_acc.kind() != ledger_domain::AccountKind::Customer
-            {
+            if to_acc.kind() != AccountKind::Customer {
                 return Err(AppError::AccountNotFound(to.as_uuid()));
             }
 
             let transfer = post_transfer(
                 TransferId::from_uuid(self.ids.generate()),
+                actor.user_id,
                 key.clone(),
                 kind,
                 &mut from_acc,

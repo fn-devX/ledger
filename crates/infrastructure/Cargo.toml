@@ -8,6 +8,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+argon2.workspace = true
+redis.workspace = true
+tokio.workspace = true
 time.workspace = true
 ledger-domain.workspace = true
 ledger-application.workspace = true
@@ -16,7 +19,6 @@ uuid.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
 
 [lints]
 workspace = true

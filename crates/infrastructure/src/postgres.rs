@@ -1,7 +1,9 @@
-use ledger_application::ports::{EntryQuery, EntryRecord, LedgerRepository, RepoError};
+use ledger_application::ports::{
+    EntryQuery, EntryRecord, LedgerRepository, RepoError, UserRepository,
+};
 use ledger_domain::{
-    Account, AccountId, AccountKind, Currency, IdempotencyKey, Money, Transfer, TransferId,
-    TransferKind,
+    Account, AccountId, AccountKind, Currency, Email, IdempotencyKey, Money, Role, Transfer,
+    TransferId, TransferKind, User, UserId,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use time::OffsetDateTime;
@@ -44,6 +46,7 @@ impl PgLedgerRepository {
 struct AccountRow {
     id: Uuid,
     kind: String,
+    holder_id: Option<Uuid>,
     owner: String,
     currency: String,
     balance: i64,
@@ -62,6 +65,7 @@ impl TryFrom<AccountRow> for Account {
         Ok(Account::restore(
             AccountId::from_uuid(r.id),
             kind,
+            r.holder_id.map(UserId::from_uuid),
             r.owner,
             currency,
             r.balance,
@@ -72,6 +76,7 @@ impl TryFrom<AccountRow> for Account {
 
 struct TransferRow {
     id: Uuid,
+    initiated_by: Option<Uuid>,
     idempotency_key: String,
     kind: String,
     from_account: Uuid,
@@ -87,6 +92,7 @@ impl TryFrom<TransferRow> for Transfer {
         let currency = Currency::parse(&r.currency).map_err(storage)?;
         Ok(Transfer::restore(
             TransferId::from_uuid(r.id),
+            r.initiated_by.map(UserId::from_uuid),
             IdempotencyKey::parse(&r.idempotency_key).map_err(storage)?,
             kind,
             AccountId::from_uuid(r.from_account),
@@ -137,10 +143,11 @@ impl LedgerRepository for PgLedgerRepository {
     async fn insert_account(&self, a: &Account) -> Result<(), RepoError> {
         let currency = a.currency();
         sqlx::query!(
-            "INSERT INTO accounts (id, kind, owner, currency, balance, version)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO accounts (id, kind, holder_id, owner, currency, balance, version)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
             a.id().as_uuid(),
             a.kind().as_str(),
+            a.holder().map(|h| h.as_uuid()),
             a.owner(),
             currency.as_str(),
             a.balance(),
@@ -155,7 +162,7 @@ impl LedgerRepository for PgLedgerRepository {
     async fn find_account(&self, id: AccountId) -> Result<Option<Account>, RepoError> {
         sqlx::query_as!(
             AccountRow,
-            "SELECT id, kind, owner, currency, balance, version FROM accounts WHERE id = $1",
+            "SELECT id, kind, holder_id, owner, currency, balance, version FROM accounts WHERE id = $1",
             id.as_uuid(),
         )
         .fetch_optional(&self.pool)
@@ -163,6 +170,21 @@ impl LedgerRepository for PgLedgerRepository {
         .map_err(storage)?
         .map(Account::try_from)
         .transpose()
+    }
+
+    async fn list_accounts(&self, holder: UserId) -> Result<Vec<Account>, RepoError> {
+        sqlx::query_as!(
+            AccountRow,
+            "SELECT id, kind, holder_id, owner, currency, balance, version
+             FROM accounts WHERE holder_id = $1 ORDER BY id",
+            holder.as_uuid(),
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?
+        .into_iter()
+        .map(Account::try_from)
+        .collect()
     }
 
     async fn system_account(
@@ -183,7 +205,7 @@ impl LedgerRepository for PgLedgerRepository {
 
         sqlx::query_as!(
             AccountRow,
-            "SELECT id, kind, owner, currency, balance, version
+            "SELECT id, kind, holder_id, owner, currency, balance, version
              FROM accounts WHERE kind = 'system' AND currency = $1",
             currency.as_str(),
         )
@@ -196,7 +218,7 @@ impl LedgerRepository for PgLedgerRepository {
     async fn find_transfer(&self, id: TransferId) -> Result<Option<Transfer>, RepoError> {
         sqlx::query_as!(
             TransferRow,
-            "SELECT id, idempotency_key, kind, from_account, to_account, amount, currency
+            "SELECT id, initiated_by, idempotency_key, kind, from_account, to_account, amount, currency
              FROM transfers WHERE id = $1",
             id.as_uuid(),
         )
@@ -209,12 +231,14 @@ impl LedgerRepository for PgLedgerRepository {
 
     async fn find_transfer_by_key(
         &self,
+        initiator: UserId,
         key: &IdempotencyKey,
     ) -> Result<Option<Transfer>, RepoError> {
         sqlx::query_as!(
             TransferRow,
-            "SELECT id, idempotency_key, kind, from_account, to_account, amount, currency
-             FROM transfers WHERE idempotency_key = $1",
+            "SELECT id, initiated_by, idempotency_key, kind, from_account, to_account, amount, currency
+             FROM transfers WHERE initiated_by = $1 AND idempotency_key = $2",
+            initiator.as_uuid(),
             key.as_str(),
         )
         .fetch_optional(&self.pool)
@@ -254,9 +278,10 @@ impl LedgerRepository for PgLedgerRepository {
         let currency = t.amount().currency();
         let inserted = sqlx::query!(
             "INSERT INTO transfers
-                 (id, idempotency_key, kind, from_account, to_account, amount, currency)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                 (id, initiated_by, idempotency_key, kind, from_account, to_account, amount, currency)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             t.id().as_uuid(),
+            t.initiator().map(|u| u.as_uuid()),
             t.idempotency_key().as_str(),
             t.kind().as_str(),
             t.from().as_uuid(),
@@ -327,5 +352,61 @@ impl LedgerRepository for PgLedgerRepository {
             .await
             .map_err(storage)?;
         Ok(())
+    }
+}
+
+struct UserRow {
+    id: Uuid,
+    email: String,
+    name: String,
+    role: String,
+    password_hash: String,
+}
+
+impl TryFrom<UserRow> for User {
+    type Error = RepoError;
+    fn try_from(r: UserRow) -> Result<Self, RepoError> {
+        let role =
+            Role::parse(&r.role).ok_or_else(|| corrupt(format!("unknown role {}", r.role)))?;
+        Ok(User::restore(
+            UserId::from_uuid(r.id),
+            Email::parse(&r.email).map_err(storage)?,
+            r.name,
+            role,
+            r.password_hash,
+        ))
+    }
+}
+
+impl UserRepository for PgLedgerRepository {
+    async fn insert_user(&self, user: &User) -> Result<(), RepoError> {
+        sqlx::query!(
+            "INSERT INTO users (id, email, name, role, password_hash) VALUES ($1, $2, $3, $4, $5)",
+            user.id().as_uuid(),
+            user.email().as_str(),
+            user.name(),
+            user.role().as_str(),
+            user.password_hash(),
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(db) if db.is_unique_violation() => RepoError::DuplicateEmail,
+            _ => storage(e),
+        })?;
+        Ok(())
+    }
+
+    async fn find_user_by_email(&self, email: &Email) -> Result<Option<User>, RepoError> {
+        sqlx::query_as!(
+            UserRow,
+            "SELECT id, email, name, role, password_hash FROM users WHERE email = $1",
+            email.as_str(),
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?
+        .map(User::try_from)
+        .transpose()
     }
 }

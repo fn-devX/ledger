@@ -13,16 +13,30 @@ services:
       timeout: 3s
       retries: 20
 
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
   api:
     build: .
     profiles: ["full"]
     environment:
       DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-insecure-dev-secret-change-me-0123456789}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@ledger.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-ledger-admin-2026}
       LOG_FORMAT: json
       RUST_LOG: info
     ports: ["8080:8080"]
     depends_on:
       postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
 
 volumes:
   pgdata:

@@ -2,7 +2,7 @@ use std::fmt;
 
 use uuid::Uuid;
 
-use crate::{Account, AccountId, DomainError, Money};
+use crate::{Account, AccountId, DomainError, Money, UserId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TransferId(Uuid);
@@ -63,6 +63,7 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transfer {
     id: TransferId,
+    initiator: Option<UserId>,
     idempotency_key: IdempotencyKey,
     kind: TransferKind,
     from: AccountId,
@@ -73,6 +74,7 @@ pub struct Transfer {
 impl Transfer {
     pub fn restore(
         id: TransferId,
+        initiator: Option<UserId>,
         idempotency_key: IdempotencyKey,
         kind: TransferKind,
         from: AccountId,
@@ -81,6 +83,7 @@ impl Transfer {
     ) -> Self {
         Self {
             id,
+            initiator,
             idempotency_key,
             kind,
             from,
@@ -91,6 +94,9 @@ impl Transfer {
 
     pub fn id(&self) -> TransferId {
         self.id
+    }
+    pub fn initiator(&self) -> Option<UserId> {
+        self.initiator
     }
     pub fn idempotency_key(&self) -> &IdempotencyKey {
         &self.idempotency_key
@@ -125,6 +131,7 @@ impl Transfer {
 
 pub fn post_transfer(
     id: TransferId,
+    initiator: UserId,
     idempotency_key: IdempotencyKey,
     kind: TransferKind,
     from: &mut Account,
@@ -141,6 +148,7 @@ pub fn post_transfer(
 
     Ok(Transfer {
         id,
+        initiator: Some(initiator),
         idempotency_key,
         kind,
         from: from.id(),
@@ -158,6 +166,7 @@ mod tests {
         Account::restore(
             AccountId::from_uuid(Uuid::from_u128(n)),
             AccountKind::Customer,
+            None,
             "x".into(),
             Currency::parse(cur).unwrap(),
             balance,
@@ -172,6 +181,7 @@ mod tests {
     fn post(from: &mut Account, to: &mut Account, amount: Money) -> Result<Transfer, DomainError> {
         post_transfer(
             TransferId::from_uuid(Uuid::nil()),
+            UserId::from_uuid(Uuid::nil()),
             IdempotencyKey::parse("k").unwrap(),
             TransferKind::Transfer,
             from,

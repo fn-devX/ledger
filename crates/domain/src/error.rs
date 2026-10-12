@@ -21,4 +21,8 @@ pub enum DomainError {
     InsufficientFunds { available: i64, requested: i64 },
     #[error("balance overflow")]
     BalanceOverflow,
+    #[error("invalid email address")]
+    InvalidEmail,
+    #[error("password must be {min}..={max} characters")]
+    WeakPassword { min: usize, max: usize },
 }

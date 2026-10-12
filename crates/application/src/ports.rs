@@ -1,7 +1,8 @@
 use std::future::Future;
 
 use ledger_domain::{
-    Account, AccountId, Currency, IdempotencyKey, Transfer, TransferId, TransferKind,
+    Account, AccountId, Currency, Email, IdempotencyKey, Password, Transfer, TransferId,
+    TransferKind, User, UserId,
 };
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -14,6 +15,8 @@ pub enum RepoError {
     Conflict,
     #[error("duplicate idempotency key")]
     DuplicateIdempotencyKey,
+    #[error("duplicate email")]
+    DuplicateEmail,
     #[error("storage failure: {0}")]
     Storage(#[source] BoxError),
 }
@@ -47,6 +50,11 @@ pub trait LedgerRepository: Send + Sync + 'static {
         id: AccountId,
     ) -> impl Future<Output = Result<Option<Account>, RepoError>> + Send;
 
+    fn list_accounts(
+        &self,
+        holder: UserId,
+    ) -> impl Future<Output = Result<Vec<Account>, RepoError>> + Send;
+
     fn system_account(
         &self,
         currency: Currency,
@@ -60,6 +68,7 @@ pub trait LedgerRepository: Send + Sync + 'static {
 
     fn find_transfer_by_key(
         &self,
+        initiator: UserId,
         key: &IdempotencyKey,
     ) -> impl Future<Output = Result<Option<Transfer>, RepoError>> + Send;
 
@@ -76,6 +85,27 @@ pub trait LedgerRepository: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Vec<EntryRecord>, RepoError>> + Send;
 
     fn ping(&self) -> impl Future<Output = Result<(), RepoError>> + Send;
+}
+
+pub trait UserRepository: Send + Sync + 'static {
+    fn insert_user(&self, user: &User) -> impl Future<Output = Result<(), RepoError>> + Send;
+
+    fn find_user_by_email(
+        &self,
+        email: &Email,
+    ) -> impl Future<Output = Result<Option<User>, RepoError>> + Send;
+}
+
+pub trait PasswordHasher: Send + Sync + 'static {
+    fn hash(&self, password: &Password) -> impl Future<Output = Result<String, BoxError>> + Send;
+
+    fn verify(
+        &self,
+        password: &str,
+        hash: &str,
+    ) -> impl Future<Output = Result<bool, BoxError>> + Send;
+
+    fn decoy_hash(&self) -> &str;
 }
 
 pub trait IdGenerator: Send + Sync + 'static {

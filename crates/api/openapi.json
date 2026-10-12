@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Ledger API",
-    "description": "Double-entry money ledger: accounts, deposits, idempotent transfers and paginated statements. Amounts are integers in minor units (1 TJS = 100 dirams). Errors follow RFC 9457 (`application/problem+json`).",
+    "description": "Double-entry money ledger: accounts, deposits, idempotent transfers and paginated statements. Amounts are integers in minor units (1 TJS = 100 dirams). Errors follow RFC 9457 (`application/problem+json`).\n\n**Auth:** register or log in via `/v1/auth/*`, then send `Authorization: Bearer <token>` (the Authorize button above). Customers work with their own accounts; admins can deposit and see everything.\n\n**Rate limits:** every `/v1` response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. Over the limit the API answers `429` with `Retry-After`. Auth endpoints are limited per IP, the rest per user.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -10,12 +10,208 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/v1/auth/register": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Register a customer",
+        "operationId": "register",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "User registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Email is already registered",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid email, name or password",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts from this IP",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Exchange email and password for an access token",
+        "description": "Returns a JWT to send as `Authorization: Bearer <token>`. The response is the same for an unknown email and a wrong password.",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Access token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid email or password",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts from this IP",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Who am I",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "The caller, as seen in the token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or expired token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/v1/accounts": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "List the caller's accounts",
+        "operationId": "list_accounts",
+        "responses": {
+          "200": {
+            "description": "Accounts held by the caller, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AccountResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or expired token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
       "post": {
         "tags": [
           "accounts"
         ],
-        "summary": "Open a customer account",
+        "summary": "Open an account for the caller",
         "operationId": "open_account",
         "requestBody": {
           "content": {
@@ -48,8 +244,28 @@
               }
             }
           },
+          "401": {
+            "description": "Missing, invalid or expired token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "422": {
-            "description": "Invalid owner or currency",
+            "description": "Invalid currency",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -58,7 +274,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/accounts/{id}": {
@@ -67,6 +288,7 @@
           "accounts"
         ],
         "summary": "Get an account and its balance",
+        "description": "Customers see only their own accounts; admins see all.",
         "operationId": "get_account",
         "parameters": [
           {
@@ -91,8 +313,28 @@
               }
             }
           },
+          "401": {
+            "description": "Missing, invalid or expired token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "404": {
-            "description": "Account not found",
+            "description": "Account not found or not yours",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -101,7 +343,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/accounts/{id}/deposits": {
@@ -109,7 +356,7 @@
         "tags": [
           "accounts"
         ],
-        "summary": "Deposit money to an account",
+        "summary": "Deposit money to an account (admin only)",
         "description": "Moves money from the currency's system account. Safe to retry with the same `Idempotency-Key`.",
         "operationId": "deposit",
         "parameters": [
@@ -126,7 +373,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Unique key of this operation, 1..=128 visible ASCII characters",
+            "description": "Unique key of this operation for the caller, 1..=128 visible ASCII characters",
             "required": true,
             "schema": {
               "type": "string"
@@ -182,6 +429,26 @@
               }
             }
           },
+          "401": {
+            "description": "Missing, invalid or expired token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not an admin",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Account not found",
             "content": {
@@ -212,6 +479,16 @@
               }
             }
           },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Too much contention, retry later",
             "content": {
@@ -222,7 +499,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/accounts/{id}/entries": {
@@ -286,8 +568,28 @@
               }
             }
           },
+          "401": {
+            "description": "Missing, invalid or expired token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "404": {
-            "description": "Account not found",
+            "description": "Account not found or not yours",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -296,7 +598,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/transfers": {
@@ -304,14 +611,14 @@
         "tags": [
           "transfers"
         ],
-        "summary": "Transfer money between two accounts",
-        "description": "Atomic double-entry transfer. Safe to retry with the same `Idempotency-Key`: the money moves exactly once.",
+        "summary": "Transfer money from your account",
+        "description": "Atomic double-entry transfer. `from` must belong to the caller. Safe to retry with the same `Idempotency-Key`: the money moves exactly once.",
         "operationId": "transfer",
         "parameters": [
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Unique key of this operation, 1..=128 visible ASCII characters",
+            "description": "Unique key of this operation for the caller, 1..=128 visible ASCII characters",
             "required": true,
             "schema": {
               "type": "string"
@@ -367,8 +674,18 @@
               }
             }
           },
+          "401": {
+            "description": "Missing, invalid or expired token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "404": {
-            "description": "Account not found",
+            "description": "Account not found or `from` is not yours",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -397,6 +714,16 @@
               }
             }
           },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Too much contention, retry later",
             "content": {
@@ -407,7 +734,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/transfers/{id}": {
@@ -416,6 +748,7 @@
           "transfers"
         ],
         "summary": "Get a transfer",
+        "description": "Visible to the holders of both accounts and to admins.",
         "operationId": "get_transfer",
         "parameters": [
           {
@@ -440,8 +773,28 @@
               }
             }
           },
+          "401": {
+            "description": "Missing, invalid or expired token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "404": {
-            "description": "Transfer not found",
+            "description": "Transfer not found or not visible to you",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -450,7 +803,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/health/live": {
@@ -623,19 +981,53 @@
           }
         }
       },
+      "LoginRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "example": "firuz@example.tj"
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "example": "correct horse battery"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MeResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "role"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "example": "Firuz Rahimov"
+          },
+          "role": {
+            "type": "string",
+            "example": "customer"
+          }
+        }
+      },
       "OpenAccountRequest": {
         "type": "object",
         "required": [
-          "owner",
           "currency"
         ],
         "properties": {
-          "owner": {
-            "type": "string",
-            "example": "Firuz Rahimov",
-            "maxLength": 200,
-            "minLength": 1
-          },
           "currency": {
             "type": "string",
             "example": "TJS",
@@ -664,6 +1056,57 @@
             "type": "integer",
             "format": "int32",
             "example": 422,
+            "minimum": 0
+          }
+        }
+      },
+      "RegisterRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "name",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "example": "firuz@example.tj"
+          },
+          "name": {
+            "type": "string",
+            "example": "Firuz Rahimov",
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "example": "correct horse battery",
+            "maxLength": 128,
+            "minLength": 8
+          }
+        },
+        "additionalProperties": false
+      },
+      "TokenResponse": {
+        "type": "object",
+        "required": [
+          "access_token",
+          "token_type",
+          "expires_in"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "token_type": {
+            "type": "string",
+            "example": "Bearer"
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "example": 3600,
             "minimum": 0
           }
         }
@@ -733,10 +1176,48 @@
             "type": "string"
           }
         }
+      },
+      "UserResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "name",
+          "role"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "email": {
+            "type": "string",
+            "example": "firuz@example.tj"
+          },
+          "name": {
+            "type": "string",
+            "example": "Firuz Rahimov"
+          },
+          "role": {
+            "type": "string",
+            "example": "customer"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
       }
     }
   },
   "tags": [
+    {
+      "name": "auth",
+      "description": "Registration and access tokens"
+    },
     {
       "name": "accounts",
       "description": "Accounts, deposits and statements"

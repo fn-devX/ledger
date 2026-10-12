@@ -15,6 +15,12 @@ pub enum ApiError {
     App(#[from] AppError),
     #[error("{0}")]
     BadRequest(String),
+    #[error("{0}")]
+    Unauthorized(&'static str),
+    #[error("too many requests, retry in {retry_after}s")]
+    RateLimited { retry_after: u64 },
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl From<QueryRejection> for ApiError {
@@ -50,6 +56,9 @@ impl ApiError {
         use DomainError as D;
         match self {
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+            Self::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            Self::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             Self::App(e) => match e {
                 A::Domain(D::InsufficientFunds { .. }) => {
                     (StatusCode::UNPROCESSABLE_ENTITY, "insufficient_funds")
@@ -65,6 +74,9 @@ impl ApiError {
                     (StatusCode::NOT_FOUND, "not_found")
                 }
                 A::InvalidPageSize { .. } => (StatusCode::BAD_REQUEST, "invalid_page_size"),
+                A::InvalidCredentials => (StatusCode::UNAUTHORIZED, "invalid_credentials"),
+                A::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+                A::EmailTaken => (StatusCode::CONFLICT, "email_taken"),
                 A::IdempotencyKeyReused => (StatusCode::CONFLICT, "idempotency_key_reused"),
                 A::Contention => (StatusCode::SERVICE_UNAVAILABLE, "contention"),
                 A::Repository(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
@@ -96,8 +108,17 @@ impl IntoResponse for ApiError {
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/problem+json"),
         );
-        if status == StatusCode::SERVICE_UNAVAILABLE {
-            headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        match &self {
+            Self::App(AppError::Contention) => {
+                headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+            }
+            Self::RateLimited { retry_after } => {
+                headers.insert(header::RETRY_AFTER, HeaderValue::from(*retry_after));
+            }
+            Self::Unauthorized(_) | Self::App(AppError::InvalidCredentials) => {
+                headers.insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+            }
+            _ => {}
         }
         resp
     }

@@ -1,7 +1,8 @@
 # Ledger — a payment core in Rust
 
 A money ledger service: accounts, deposits and transfers with **double-entry bookkeeping**,
-**idempotency** and **optimistic locking**. Built with a hexagonal (clean) architecture.
+**idempotency** and **optimistic locking**, behind **JWT authentication** and **Redis rate limiting**.
+Built with a hexagonal (clean) architecture.
 
 ## Architecture
 
@@ -11,22 +12,24 @@ flowchart LR
 
     subgraph api["crates/api — outer layer"]
         direction TB
-        http["HTTP (Axum)<br/>DTOs, RFC 9457 errors, middleware"]
+        http["HTTP (Axum)<br/>DTOs, RFC 9457 errors, JWT, rate limit middleware"]
         root["main.rs — composition root<br/>config, tracing, graceful shutdown"]
     end
 
     subgraph app["crates/application — use cases"]
-        svc["LedgerService<br/>open_account / deposit / transfer"]
-        ports{{"ports:<br/>LedgerRepository, IdGenerator"}}
+        svc["LedgerService + AuthService<br/>use cases with authorization"]
+        ports{{"ports:<br/>LedgerRepository, UserRepository,<br/>PasswordHasher, RateLimiter, IdGenerator"}}
     end
 
     subgraph dom["crates/domain — core"]
-        model["Money, Currency, Account,<br/>Transfer, post_transfer()"]
+        model["Money, Account, Transfer,<br/>User, Email, Password, post_transfer()"]
     end
 
     subgraph infra["crates/infrastructure — adapters"]
         pg["PgLedgerRepository (sqlx)"]
         mem["InMemoryLedger"]
+        argon["Argon2Hasher"]
+        redis["RedisRateLimiter (GCRA, Lua)"]
         ids["UuidV7Generator"]
     end
 
@@ -36,8 +39,11 @@ flowchart LR
     pg -. implements .-> ports
     mem -. implements .-> ports
     ids -. implements .-> ports
+    argon -. implements .-> ports
+    redis -. implements .-> ports
     root --> infra
     pg --> db[(PostgreSQL)]
+    redis --> rds[(Redis)]
 ```
 
 **Dependency rule:** arrows point inwards only.
@@ -66,6 +72,9 @@ The domain is tested in milliseconds, and the storage can be swapped without tou
 - **Defense in depth:** even with a bug in the code, the database rejects a negative customer balance (`CHECK`) and a duplicate key (`UNIQUE`).
 - **Compile-time checked SQL:** every query uses `sqlx::query!` / `query_as!`, so a typo in a column name, a wrong parameter type or a nullable column read into a non-`Option` field is a **compile error**, not a production incident. Query metadata is cached in `.sqlx/` (committed), and `.cargo/config.toml` sets `SQLX_OFFLINE=true`, so building never needs a running database — on a laptop, in Docker or in CI. CI fails if the cache is stale.
 - **API contract generated from code:** the OpenAPI spec is built by `utoipa` from the handlers and DTOs (`#[utoipa::path]`, `ToSchema`), so it cannot drift from the implementation. Tests check that every documented operation is actually routed and that the committed snapshot is current. Swagger UI is vendored — no network access at build time.
+- **Authentication:** passwords are hashed with Argon2id off the async runtime (`spawn_blocking`). Login returns an HS256 JWT (`sub`, `role`, `iss`, `exp`); the signature, issuer and expiry are validated, `alg=none` and foreign keys are rejected. Logging in with an unknown email verifies against a decoy hash, so it takes as long and answers the same as a wrong password — emails cannot be enumerated.
+- **Authorization lives in the use cases**, not in HTTP: customers spend and see only their accounts, only admins (the cash desk) can deposit money. Idempotency keys are scoped per user, so one user's key never collides with another's.
+- **Rate limiting with GCRA** (a token bucket without a background refill): one Lua script in Redis reads the bucket, decides and updates it atomically using Redis' own clock, so all instances share one limit. Auth endpoints are limited per client IP (brute-force protection), the rest of the API per user. Responses carry `RateLimit-*` headers, `429` carries `Retry-After`. If Redis is down the API fails open and logs a warning rather than going down with it.
 - **Native `async fn` in traits** instead of `async_trait`; static dispatch through generics.
 - **UUIDv7** — time-ordered, index-friendly ids.
 - **Errors:** `thiserror` per layer; the API returns `application/problem+json` and never leaks internal details.
@@ -78,12 +87,17 @@ The domain is tested in milliseconds, and the storage can be swapped without tou
 Requires Rust (stable) and Docker Desktop.
 
 ```bash
-docker compose up -d postgres      # PostgreSQL on localhost:5432
+docker compose up -d postgres redis
 cp .env.example .env               # PowerShell: copy .env.example .env
-cargo run -p ledger-api            # http://localhost:8080
+cargo run -p ledger-api            # http://localhost:8080/swagger-ui/
 ```
 
-Without `DATABASE_URL` the service starts with in-memory storage — handy for quick experiments.
+On start the service applies migrations and creates the admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+Log in through `POST /v1/auth/login`, then press **Authorize** in Swagger UI and paste the token.
+
+Every dependency is optional for local experiments: without `DATABASE_URL` storage is in-memory,
+without `REDIS_URL` rate limits are per process, without `JWT_SECRET` a random key is generated
+(tokens stop working after a restart).
 Everything in containers: `docker compose --profile full up --build`.
 
 On Windows you can just double-click `scripts\run.cmd` (starts the service on port 8090),
@@ -98,15 +112,21 @@ Interactive docs: **`/swagger-ui/`** (e.g. http://localhost:8080/swagger-ui/). T
 served at `/api-docs/openapi.json` and committed as [`crates/api/openapi.json`](crates/api/openapi.json),
 so API changes show up in code review and clients can be generated from it.
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/v1/accounts` | open an account `{owner, currency}` |
-| `GET` | `/v1/accounts/{id}` | account and balance |
-| `GET` | `/v1/accounts/{id}/entries?limit=&cursor=` | statement: entries newest first with running balance, cursor pagination |
-| `POST` | `/v1/accounts/{id}/deposits` | deposit `{amount_minor, currency}` + `Idempotency-Key` |
-| `POST` | `/v1/transfers` | transfer `{from, to, amount_minor, currency}` + `Idempotency-Key` |
-| `GET` | `/v1/transfers/{id}` | transfer |
-| `GET` | `/health/live`, `/health/ready` | Kubernetes probes |
+| Method | Path | Who | Description |
+|---|---|---|---|
+| `POST` | `/v1/auth/register` | anyone | create a customer `{email, name, password}` |
+| `POST` | `/v1/auth/login` | anyone | get an access token `{email, password}` |
+| `GET` | `/v1/auth/me` | user | the caller, from the token |
+| `GET` | `/v1/accounts` | user | the caller's accounts |
+| `POST` | `/v1/accounts` | user | open an account `{currency}` for the caller |
+| `GET` | `/v1/accounts/{id}` | holder, admin | account and balance |
+| `GET` | `/v1/accounts/{id}/entries?limit=&cursor=` | holder, admin | statement: entries newest first with running balance, cursor pagination |
+| `POST` | `/v1/accounts/{id}/deposits` | admin | deposit `{amount_minor, currency}` + `Idempotency-Key` |
+| `POST` | `/v1/transfers` | holder of `from` | transfer `{from, to, amount_minor, currency}` + `Idempotency-Key` |
+| `GET` | `/v1/transfers/{id}` | both sides, admin | transfer |
+| `GET` | `/health/live`, `/health/ready` | anyone | Kubernetes probes |
+
+Foreign accounts and transfers answer `404`, not `403`, so their ids cannot be probed.
 
 ## Quality
 
@@ -114,7 +134,7 @@ so API changes show up in code review and clients can be generated from it.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings   # clippy::pedantic enabled
 cargo test --workspace                                  # in-memory
-DATABASE_URL=postgres://ledger:ledger@localhost:5432/ledger cargo test --workspace  # + Postgres
+DATABASE_URL=postgres://ledger:ledger@localhost:5432/ledger REDIS_URL=redis://localhost:6379 cargo test --workspace  # + Postgres + Redis
 ```
 
 ### Changing SQL
@@ -149,7 +169,7 @@ and builds the Docker image.
 - [x] Paginated account entry history, `GET /v1/accounts/{id}/entries`
 - [x] `sqlx` compile-time checked queries (`query!` + offline mode)
 - [x] OpenAPI spec (`utoipa`) and Swagger UI
-- [ ] Authentication (JWT), rate limiting (Redis)
+- [x] Authentication (JWT), rate limiting (Redis)
 - [ ] Outbox pattern → Kafka/NATS, notification service over gRPC (`tonic`)
 - [ ] Prometheus metrics, OpenTelemetry traces → Grafana/Jaeger
 - [ ] Property tests (`proptest`), load testing (k6)
